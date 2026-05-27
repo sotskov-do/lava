@@ -56,6 +56,33 @@ Verify these values against the chain's actual characteristics. Read the spec gu
 
 ### Phase 3: API completeness audit
 
+This phase has two complementary inputs: a deterministic diff against the upstream `create-spec` scout's method list (when present), and your own research against the chain's documentation (always required).
+
+#### 3a. Scout method-list diff (if `/tmp/<index_lower>_methods.txt` exists)
+
+When the `/create-spec` orchestrator runs, its `api-docs-researcher` agent writes the full discovered method list to `/tmp/<index_lower>_methods.txt` (one method per line). If that file exists, run the bundled comparison script — it walks the spec's `imports[]` transitively and emits PRESENT / MISSING / EXTRA-IN-SPEC sections:
+
+```bash
+SPEC="$ARGUMENTS[0]"
+INDEX_LOWER=$(jq -r '.proposal.specs[0].index | ascii_downcase' "$SPEC")
+METHODS="/tmp/${INDEX_LOWER}_methods.txt"
+if [ -f "$METHODS" ]; then
+  bash .claude/skills/review-spec/scripts/compare_spec_methods.sh "$SPEC" "$METHODS"
+else
+  echo "no scout method-list at $METHODS — falling back to docs-only research in 3b"
+fi
+```
+
+Classify each row from the script's output:
+- Every entry under `=== MISSING ===` is a candidate **CRITICAL** or **MEDIUM** gap. Apply the same allowed-omission rules as create-spec (deprecated, admin-only, platform-specific, or empirically absent against the public RPC) — only those four reasons justify omission; "researcher didn't find it" is NOT valid.
+- Every entry under `=== EXTRA IN SPEC ===` is a **MINOR** review item (potentially over-advertised — verify with a live `-32601` probe before recommending removal).
+
+The scout diff is fast and deterministic but is NOT a substitute for your own research. Always continue to 3b.
+
+#### 3b. Independent research against chain documentation
+
+Regardless of what 3a found (or whether 3a ran at all), do your own research against the chain's authoritative API documentation. The scout can under-count; your independent pass catches what it missed.
+
 If API documentation was provided (`$ARGUMENTS[1]`):
 
 1. Extract all API paths from the documentation
@@ -64,7 +91,9 @@ If API documentation was provided (`$ARGUMENTS[1]`):
    - **Missing from spec**: endpoints in docs but not in spec — classify each as intentional exclusion (deprecated, different server, platform-specific) or a gap
    - **Extra in spec**: endpoints in spec but not in docs — potential typos or outdated APIs
 
-If no API docs provided, note this as a limitation and flag that API completeness cannot be verified.
+If no API docs path was passed, locate the chain's official RPC reference yourself (WebSearch / WebFetch on the chain's developer docs). Enumerate every documented method end-to-end — do not stop at "popular" subsets or summary tables. Then perform the same docs-vs-spec diff above.
+
+Merge findings: a method flagged by EITHER 3a OR 3b is a real gap. Do not assume 3a's PRESENT list is exhaustive — the scout's list could itself be incomplete.
 
 ### Phase 4: Method-by-method review
 

@@ -9,6 +9,7 @@ Discover, classify, and document all RPC/API methods available for a given block
 ## Inputs
 
 - `chain_name`: The name of the blockchain (e.g., "Ethereum", "Cosmos Hub", "Solana")
+- `chain_index_lower`: The mainnet spec index lowercased (e.g., `iota`, `polygon`, `eth1`) — used to name the method-list output file
 - `docs_url` (optional): A direct URL to API documentation
 
 ## Core Instructions
@@ -167,6 +168,33 @@ Document essential methods for spec generation:
 - Interface Overview: REST (primary), gRPC (primary), TendermintRPC (primary)
 - Critical Methods: GET /cosmos/base/tendermint/v1beta1/blocks/latest, GetLatestBlock (gRPC)
 - Methods: [separate tables for REST, gRPC, TendermintRPC]
+
+## Required side-effect: write the discovered method list to /tmp
+
+In addition to the structured report above, you MUST write a plain-text method-list file that the orchestrator and downstream reviewers consume:
+
+- **Path:** `/tmp/<chain_index_lower>_methods.txt` (e.g., `/tmp/iota_methods.txt`, `/tmp/polygon_methods.txt`). Use the `chain_index_lower` input verbatim.
+- **Format:** one method name per line, exactly as it appears on the wire. No header, no commentary, no blank lines, no indentation, no comments. Example:
+
+```
+gettxoutproof
+gettxoutsetinfo
+createrawtransaction
+decoderawtransaction
+decodescript
+getrawtransaction
+sendrawtransaction
+testmempoolaccept
+estimatefee
+estimatesmartfee
+estimatepriority
+validateaddress
+```
+
+- **Contents:** EVERY method you discovered across all interfaces — the same set you populated into the "All Methods by Interface Type" tables above. Include `jsonrpc`, `rest`, `grpc`, and `tendermintrpc` method names in one combined file, deduplicated. For REST endpoints, use the path verbatim (e.g., `/cosmos/base/tendermint/v1beta1/blocks/latest`).
+- **Do NOT** filter, trim, or "scope" this list — it is the input to the spec reviewer's missing-methods diff via `compare_spec_methods.sh`. Under-counting here propagates into a passing review that hides real gaps.
+
+Use the Write tool to create the file. After writing, run `wc -l /tmp/<chain_index_lower>_methods.txt` and report the line count to confirm the file was emitted. The line count MUST equal the unique-method count you report in your structured output above.
 
 ## Quality Standards
 

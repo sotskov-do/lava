@@ -67,7 +67,7 @@ Read the four agent prompt files first (full-read with sentinel verification, wh
 - `.claude/skills/create-spec/references/agents/upstream-spec-scout.md`
 - `.claude/skills/create-spec/references/agents/plugin-researcher.md`
 
-Substitute placeholders (`{chain_name}`, `{docs_url}`, `{mainnet_indices_or_known_parents}`, `{public_repo_path}`) with the values gathered in Phase 2 plus any heuristics (e.g., `{public_repo_path}` is empty unless the user has resolved a lava-specs clone).
+Substitute placeholders (`{chain_name}`, `{chain_index_lower}`, `{docs_url}`, `{mainnet_indices_or_known_parents}`, `{public_repo_path}`) with the values gathered in Phase 2 plus any heuristics. `{chain_index_lower}` is the mainnet index lowercased (e.g., `iota` for `IOTA`); the api-docs-researcher uses it to name `/tmp/<chain_index_lower>_methods.txt`. `{public_repo_path}` is empty unless the user has resolved a lava-specs clone.
 
 Dispatch all four in a single message:
 
@@ -81,6 +81,14 @@ Agent(description: "Detect plugins/extensions for {chain}", subagent_type: "gene
 When all four agents complete (you will receive notifications), collect their reports and proceed to Phase 4.
 
 If the upstream-spec-scout agent reports that no lava-specs clone was resolved, treat its output as empty (no parent-spec hints) and continue.
+
+**Verify the scout's method-list file exists.** The api-docs-researcher is required to write `/tmp/<chain_index_lower>_methods.txt` (one method per line, no commentary) — this file is what downstream `/review-spec` reviewers diff against the spec via `compare_spec_methods.sh`. Confirm it before proceeding:
+
+```bash
+wc -l /tmp/<chain_index_lower>_methods.txt
+```
+
+The line count must match the unique-method count in the researcher's structured report. If the file is missing, partial, or has only a few lines despite the report claiming dozens of methods, re-dispatch the api-docs-researcher with explicit instructions to write the file before returning.
 
 ## Phase 4 — Synthesis (gated by phase-file reads)
 
@@ -345,134 +353,36 @@ jq . specs/testnet-2/specs/<chain>.json 2>&1 | head -n 20
 
 Fix the JSON and re-run until exit 0. Do not proceed to Phase 8 until `jq` exits 0.
 
-## Phase 8 — Local provider boot + multi-node method probe
+## Phase 8 — Local provider boot + multi-node method probe (delegated subagent)
 
-**Execute the steps below verbatim. Do NOT inspect `scripts/pre_setups/init_chain_only_with_node.sh` to reason about its internals, do NOT question the timeouts, and do NOT improvise the config format. The procedure below is authoritative.**
+This phase is delegated to a single `general-purpose` subagent so the orchestrator's context does not have to absorb 5–15 minutes of build/boot/probe output. You (the orchestrator) do NOT execute the boot script, write the provider config, or run probes yourself — you only dispatch and collect the result.
 
-Optional informational read for additional context only (the steps below take precedence over anything you find here): `references/phase4-testing-and-validation.md` (observe `END-OF-PHASE4-SENTINEL`).
+**Inputs to gather before dispatch** (from earlier phases — do NOT re-research):
+- `<chain>` — lowercased chain name (filename stem, e.g., `iota`)
+- `<INDEX>` — spec index UPPERCASE (e.g., `IOTA`)
+- `<INTERFACE>` — `jsonrpc` | `rest` | `grpc` | `tendermintrpc` (the spec's `api_collections[].collection_data.api_interface`)
+- `<NODE_URL_1>`, `<NODE_URL_2>`, `<NODE_URL_3>` — 2–3 public node URLs (https://… or wss://…) — from Phase 2 or chain-metadata-researcher
+- `<WS_URL>` (optional) — separate WebSocket URL if not already in the URL list
+- `<EXTRA_INTERFACES>` (optional) — additional `(INTERFACE, urls)` blocks for multi-interface chains (Cosmos)
 
-The boot script does a full local-chain bootstrap (compile binaries → start a fresh lava node → submit and pass a spec-add gov proposal → submit and pass a plans-add proposal → stake provider → advance an epoch → spawn `provider1` and `consumers` `screen` sessions). Realistic wall-clock: **5–15 minutes per invocation**. This is expected. Do not abort early.
+If 2–3 node URLs are NOT available, SKIP this phase entirely (record the reason) and proceed to Phase 9 — the orchestrator must not invent URLs. Note in the Phase 12 checklist that Phase 8 was skipped.
 
-### Step 8a — Write the provider config
+**Read the subagent prompt fully** before dispatch:
+- `.claude/skills/create-spec/references/agents/local-provider-tester.md` (observe `END-OF-LOCAL-PROVIDER-TESTER-SENTINEL`)
 
-Write `testutil/debugging/logs/<chain>_provider.yml` with EXACTLY this structure (no other fields, no other sections):
+**Dispatch ONE Agent subagent** with `subagent_type: general-purpose` (no `isolation` parameter — the subagent operates on the live working tree, since the candidate spec is uncommitted). Pass the prompt with all placeholders substituted. Use the Bash tool's `run_in_background` semantics inside the subagent — but the subagent itself runs in the foreground from your point of view (you wait for its single return).
 
-```yaml
-# ./scripts/pre_setups/init_chain_only_with_node.sh specs/testnet-2/specs/<chain>.json <INDEX> <interface> testutil/debugging/logs/<chain>_provider.yml
-endpoints:
-  - api-interface: <INTERFACE>
-    chain-id: <INDEX>
-    network-address:
-      address: 127.0.0.1:2220
-    node-urls:
-      - url: <NODE_URL_1>
-      - url: <NODE_URL_2>
-      - url: <NODE_URL_3>
+```
+Agent(description: "Boot local provider + probe methods for <chain>",
+      subagent_type: "general-purpose",
+      prompt: <local-provider-tester.md with placeholders substituted>)
 ```
 
-Rules — apply exactly:
-- `network-address` is a nested object with a single `address:` field. Value is **always** `127.0.0.1:2220` (the init script hardcodes this listener; do not change it).
-- `<INTERFACE>` is one of: `jsonrpc`, `rest`, `grpc`, `tendermintrpc`. Use the spec's `api_collections[].collection_data.api_interface` value.
-- `<INDEX>` is the spec index — uppercase (e.g., `IOTA`, `IOTAT`).
-- `node-urls` is a flat list of `- url: <URL>` items. **Add 2–3 entries**, one per node URL the user or chain-metadata-researcher selected.
-- For chains with WebSocket subscriptions, add the `wss://` URL as ANOTHER entry in the same `node-urls` list (do NOT create a separate section). Example: `- url: wss://eth-rpc.example.com`.
-- For multi-interface chains (Cosmos has jsonrpc + rest + tendermintrpc + grpc), repeat the `endpoints[]` block once per interface, all using the same `network-address.address: 127.0.0.1:2220`. See `testutil/debugging/logs/cosmoshub_provider.yml` for the multi-interface shape.
-- `add_on` / addons are defined in the SPEC file (`collection_data.add_on`), NOT in this provider config. Do not invent addon fields here.
+When the subagent returns, it reports a short summary (counts + FAIL/TIMEOUT method names + teardown status) and the path to `specs/docs/<chain>/METHOD_PROBE_REPORT.md`. Read the report from disk if you need detail — do not ask the subagent to echo it back.
 
-After writing, dump the file and confirm it parses as YAML:
+If the subagent reports `SMOKE: BOOT_FAILED` or otherwise indicates the provider could not boot, present the error to the user and STOP. Do not proceed to Phase 9.
 
-```bash
-cat testutil/debugging/logs/<chain>_provider.yml
-python3 -c 'import yaml,sys; yaml.safe_load(open("testutil/debugging/logs/<chain>_provider.yml"))'
-```
-
-### Step 8b — Invoke the boot script
-
-Run the script in the FOREGROUND (the script itself daemonizes the provider via `screen`; you must wait for the script to finish its setup work before probing).
-
-```bash
-./scripts/pre_setups/init_chain_only_with_node.sh \
-  specs/testnet-2/specs/<chain>.json \
-  <INDEX> \
-  <INTERFACE> \
-  testutil/debugging/logs/<chain>_provider.yml
-```
-
-Use the Bash tool's `run_in_background: true` option, set `timeout: 1200000` (20 minutes), and watch for completion. Do NOT use a 60s timeout. Do NOT redirect to `/tmp/provider_*.log` — the script writes its real output to `testutil/debugging/logs/PROVIDER1.log` and `testutil/debugging/logs/CONSUMERS.log` (it `rm`s these at startup and re-creates them).
-
-### Step 8c — Wait for the provider to be ready
-
-The script returns control once it has spawned the `provider1` and `consumers` `screen` sessions. After it returns, the provider is starting up but may not yet be listening. Confirm readiness:
-
-```bash
-# 1. Both screen sessions exist
-screen -ls | grep -E "(provider1|consumers)"
-# Expected: two lines, one per session
-
-# 2. Provider has bound its listener
-timeout 60 bash -c 'until grep -q "listening on" testutil/debugging/logs/PROVIDER1.log 2>/dev/null \
-  || grep -qE "FTL|panic|failed to load spec|provider verification" testutil/debugging/logs/PROVIDER1.log 2>/dev/null; do
-  sleep 2
-done'
-
-# 3. Print last 50 lines of provider log for evidence
-tail -n 50 testutil/debugging/logs/PROVIDER1.log
-```
-
-If the log shows `FTL`, `panic`, `failed to load spec`, or `provider verification` failures before any success marker, STOP. Capture the full log, present the error to the user, and go to Step 8f (teardown) before deciding next action. Do NOT skip to Step 8d.
-
-If `screen -ls` shows no `provider1` session, the script crashed mid-setup. STOP and present the script's stdout/stderr to the user.
-
-### Step 8d — Method-probe loop
-
-For every API in every collection of the current spec variant:
-
-| Category | Probe action |
-|---|---|
-| `category.stateful: 1` | SKIP. Record reason: "stateful — would broadcast transaction". |
-| `category.subscription: true` | Open WS to `<NODE_URL>` (use the `wss://` entry from the provider config), send the subscribe call with sample params from the spec's `parse_directive` or `block_parsing` hints, **wait up to 30 seconds for at least one message**, then send unsubscribe. PASS = ≥1 message received. FAIL = timeout. |
-| Anything else | Build the simplest valid call from `block_parsing` + `parse_directive` hints. Send it directly to each of the 2–3 `node-urls` URLs (NOT through the lava consumer). Classify. |
-
-Response classification:
-- Response with `result` field (any value, including empty) → **PASS** (method exists and responded).
-- Response with `error.code == -32601` → **FAIL** (method does not exist on chain).
-- Response with `error.code == -32602` (invalid params) → **PASS-existence** (method exists; full functional probe would need correct args).
-- Response with any other `error.code` → **WARN** (record code + message).
-- Timeout (no response in 10s) → **TIMEOUT**.
-- Node disagreement (2-3 nodes return materially different shapes for the same method) → **WARN-DISAGREEMENT** (record which nodes disagree).
-
-### Step 8e — Write the probe report
-
-```bash
-mkdir -p specs/docs/<chain>
-```
-
-Write `specs/docs/<chain>/METHOD_PROBE_REPORT.md`:
-
-```markdown
-# Method Probe Report — <chain>
-
-Generated: <UTC timestamp>
-Provider config: testutil/debugging/logs/<chain>_provider.yml
-Spec variant: <INDEX> (<INTERFACE>)
-Nodes probed: <URL_1>, <URL_2>, <URL_3>
-
-| Method | Classification | Node 1 | Node 2 | Node 3 | Notes |
-|---|---|---|---|---|---|
-| <method> | <PASS/FAIL/SKIP/WARN/TIMEOUT> | <code> | <code> | <code> | <one-line note> |
-| ... |
-```
-
-### Step 8f — Tear down
-
-```bash
-screen -X -S provider1 quit 2>/dev/null || true
-screen -X -S consumers quit 2>/dev/null || true
-screen -X -S node quit 2>/dev/null || true
-screen -wipe 2>/dev/null || true
-```
-
-Repeat 8a–8f for each `(spec_variant, api_interface)` pair. Each iteration starts from a fresh lava node (the init script wipes screens and logs at startup).
+If the subagent reports clean teardown and a populated report, proceed to Phase 9.
 
 ## Phase 9 — Parallel reviewers (3 fresh subagents, immediate-rename for collision)
 
@@ -558,45 +468,27 @@ echo "jq exit: $?"
 
 If exit non-zero: outcome = `BROKEN_AFTER_FIX`. Present the snapshot path (`/tmp/spec_<chain>_pre_fix.json`), the `jq` error, and the fixer's diff to the user. STOP. Do not proceed to Phase 10b.
 
-## Phase 10b — Smoke regression test
+## Phase 10b — Smoke regression test (delegated subagent)
 
-**Do NOT manually submit gov proposals, vote, or otherwise touch `lavad tx gov` commands.** Do NOT reason about whether the change is "purely a CU update" or otherwise "small enough to skip re-bootstrapping". Do NOT manually tear down screens before re-running. The boot script handles all of that itself — your only job is to re-run it and re-probe.
+Same delegation pattern as Phase 8 — a single `general-purpose` subagent re-boots the local provider against the FIXED spec on disk and re-probes a deterministic minimal set to detect regressions. The orchestrator does NOT execute the boot script or compare classifications inline.
 
-### Step 10b.1 — Re-run the boot script verbatim
+Skip this phase entirely if Phase 8 was skipped (no node URLs available).
 
-Re-invoke `scripts/pre_setups/init_chain_only_with_node.sh` for each `(spec_variant, api_interface)` pair, using the EXISTING provider config file from Phase 8 (do not regenerate it — the same node URLs apply). The script wipes existing screens and logs at startup (`killall screen; screen -wipe; rm $LOGS_DIR/*.log`), then re-runs the full bootstrap: `make install-all` → start a fresh lava node → submit and pass a spec-add gov proposal using the updated spec file on disk (this picks up Phase 10's fixes automatically) → submit and pass plans-add → stake provider → spawn `provider1` + `consumers` screens.
+**Read the subagent prompt fully** before dispatch:
+- `.claude/skills/create-spec/references/agents/local-provider-smoke-tester.md` (observe `END-OF-LOCAL-PROVIDER-SMOKE-TESTER-SENTINEL`)
 
-```bash
-./scripts/pre_setups/init_chain_only_with_node.sh \
-  specs/testnet-2/specs/<chain>.json \
-  <INDEX> \
-  <INTERFACE> \
-  testutil/debugging/logs/<chain>_provider.yml
+**Dispatch ONE Agent subagent** with `subagent_type: general-purpose` and no `isolation`. Substitute the same `<chain>` / `<INDEX>` / `<INTERFACE>` / node URLs used in Phase 8, and pass the Phase 8 report path (`specs/docs/<chain>/METHOD_PROBE_REPORT.md`) plus the deduplicated Phase 10 fix list (so the smoke tester can suggest a plausible culprit on regression).
+
+```
+Agent(description: "Smoke re-test fixed spec for <chain>",
+      subagent_type: "general-purpose",
+      prompt: <local-provider-smoke-tester.md with placeholders substituted>)
 ```
 
-Use the Bash tool with `run_in_background: true` and `timeout: 1200000` (20 minutes). Same as Phase 8b. The realistic 5–15-minute wall-clock applies again — this is expected. Do not attempt to "skip" any part of the boot to save time.
-
-After the script returns, run the readiness check from Phase 8c (`screen -ls`, poll `PROVIDER1.log` for "listening on" or fatal patterns).
-
-If the script fails to spawn `provider1`/`consumers` screens or `PROVIDER1.log` shows `FTL`/`panic`/`failed to load spec`/`provider verification` failures, STOP. Present the log to the user — this is a REGRESSION introduced by Phase 10's fixes.
-
-### Step 10b.2 — Re-probe a deterministic minimal set
-
-1. `GET_BLOCKNUM` parse directive — same call as Phase 8.
-2. `chain-id` verification — call the verification method and confirm response matches the spec's `expected_value`.
-3. **5 sampled read methods** — deterministically the first 5 non-stateful, non-subscription APIs (alphabetical by name) from the largest collection.
-
-### Step 10b.3 — Compare classifications
-
-For each of these 7 probes, compare the Phase 10b classification against the Phase 8 classification (from `METHOD_PROBE_REPORT.md`):
-
-- If a probe was PASS in Phase 8 and is now FAIL or TIMEOUT → **REGRESSION**.
-- If a probe was FAIL/WARN/TIMEOUT in Phase 8 and is now PASS → improvement (record but do not alert).
-- All else → no change.
-
-If any REGRESSION is detected: surface the diff to the user. Show what was probed, what changed, and which fix from Phase 10 likely caused it. STOP. Do not proceed to Phase 11.
-
-If no regressions, tear down the provider (Step 8f) and continue.
+When the subagent returns, expect one of:
+- `SMOKE: OK` → proceed to Phase 11.
+- `SMOKE: REGRESSION` → present the 7-row probe table and the suspected-culprit note to the user. STOP. Do NOT proceed to Phase 11.
+- `SMOKE: BOOT_FAILED` → present the log excerpt. STOP. Do NOT proceed to Phase 11.
 
 ## Phase 11 — Final reviewer (clean context)
 
