@@ -1,0 +1,26 @@
+{
+  "proposal": {
+    "specs": [
+      {
+        "index": "GOODCHAIN",
+        "api_collections": [
+          {
+            "collection_data": {"api_interface": "jsonrpc"},
+            "parse_directives": [
+              {"function_tag": "GET_BLOCKNUM", "api_name": "eth_blockNumber"},
+              {"function_tag": "VERIFICATION", "api_name": "eth_chainId"}
+            ],
+            "verifications": [
+              {
+                "name": "chain-id",
+                "parse_directive": {"function_tag": "VERIFICATION", "api_name": "eth_chainId"},
+                "values": [{"expected_value": "0x1"}],
+                "severity": "Fail"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

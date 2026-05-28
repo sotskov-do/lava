@@ -67,7 +67,7 @@ Read the four agent prompt files first (full-read with sentinel verification, wh
 - `.claude/skills/create-spec/references/agents/upstream-spec-scout.md`
 - `.claude/skills/create-spec/references/agents/plugin-researcher.md`
 
-Substitute placeholders (`{chain_name}`, `{chain_index_lower}`, `{docs_url}`, `{mainnet_indices_or_known_parents}`, `{public_repo_path}`) with the values gathered in Phase 2 plus any heuristics. `{chain_index_lower}` is the mainnet index lowercased (e.g., `iota` for `IOTA`); the api-docs-researcher uses it to name `/tmp/<chain_index_lower>_methods.txt`. `{public_repo_path}` is empty unless the user has resolved a lava-specs clone.
+Substitute placeholders (`{chain_name}`, `{chain_index_lower}`, `{docs_url}`, `{mainnet_indices_or_known_parents}`, `{public_repo_path}`) with the values gathered in Phase 2 plus any heuristics. `{chain_index_lower}` is the mainnet index lowercased (e.g., `iota` for `IOTA`); it is passed to BOTH `api-docs-researcher` (which names `/tmp/<chain_index_lower>_methods.txt`) AND `upstream-spec-scout` (which names `/tmp/<chain_index_lower>_directives.txt` when a template is found). `{public_repo_path}` is empty unless the user has resolved a lava-specs clone.
 
 Dispatch all four in a single message:
 
@@ -250,6 +250,24 @@ Walk the extended completeness checklist below. For each item, either confirm or
 - Every `parser_arg` is an array of strings
 - No duplicate API `name` within a single collection
 
+### GATE — Methods coverage (scout list diff)
+
+Confirm the candidate spec covers every method `api-docs-researcher` discovered. Run the deterministic diff against the scout's `/tmp/<chain_index_lower>_methods.txt` (written in Phase 3):
+
+```bash
+CAND=specs/testnet-2/specs/<chain>.json
+bash .claude/skills/create-spec/scripts/compare_spec_methods.sh \
+  "$CAND" \
+  /tmp/<chain_index_lower>_methods.txt
+```
+
+The script walks `.imports[]` transitively and emits `=== PRESENT ===`, `=== MISSING ===`, and `=== EXTRA IN SPEC ===` sections.
+
+- `=== MISSING ===` must be empty, OR each missing method must have an explicit allowed-omission reason from this set: `deprecated`, `admin-only`, `platform-specific (e.g., GraphQL-only)`, `empirically absent (curl returned -32601 against <node_url>)`. Any unjustified missing method → REFUSE-TO-WRITE. Restore the method to the spec (or document the omission reason inline above the spec block in the orchestrator's response) before proceeding.
+- `=== EXTRA IN SPEC ===` is informational — a child spec can legitimately add chain-specific methods.
+
+If `/tmp/<chain_index_lower>_methods.txt` is missing (scout step failed in Phase 3), STOP and re-run the api-docs-researcher dispatch — do NOT proceed without the ground-truth list.
+
 ### GATE — Archive ↔ pruning ↔ GET_EARLIEST_BLOCK consistency
 
 For each spec entry: `archive` extension, `pruning` verification, and `GET_EARLIEST_BLOCK` parse_directive are an indivisible triplet. They are all present or all absent. The canonical structure of each lives in `references/phase3.4-parse-directives-and-extensions.md`.
@@ -272,7 +290,7 @@ If `upstream-spec-scout` recommended a template spec from the working tree, run 
 
 ```bash
 TPL=<template-path>   # e.g., specs/testnet-2/specs/sui.json
-for axis in 'parse_directives[]?.function_tag' 'extensions[]?.name' 'verifications[]?.name'; do
+for axis in 'extensions[]?.name' 'verifications[]?.name'; do
   echo "--- $axis ---"
   diff <(jq -r "[.proposal.specs[0].api_collections[].${axis}] | unique[]" "$TPL") \
        <(jq -r "[.proposal.specs[0].api_collections[].${axis}] | unique[]" "$CAND")
@@ -292,31 +310,35 @@ curl -s -X POST -H "Content-Type: application/json" \
 
 Capture the returned hex value VERBATIM and put it in the spec's `verifications[].values[0].expected_value`. Show the response to the user. Do not convert from a decimal in the docs — hex/decimal typos are a common spec-failure cause.
 
-### GATE — Live parse-directive validation
+### GATE — Parse directives (delegated subagent)
 
-A `parse_directive` is more than a structural element: its `function_template` and `result_parsing` together specify a CALL + EXTRACTION pipeline that the relay layer executes at runtime. Wrong template or wrong result_parsing path looks fine in jq but fails at relay time. For each `parse_directive` in the candidate, issue the call against the chain's mainnet public RPC and verify the extraction:
+This gate is delegated to a single `general-purpose` subagent (`parse-directive-validator`) that owns three layers: a static canonical-matrix check, a scout-emitted directives diff (`compare_spec_directives.sh`), and live RPC validation. The orchestrator reads only the agent's structured summary.
 
-For each directive (skip if no mainnet RPC URL is available — Phase 8 will catch the rest):
+**Read the agent prompt fully** before dispatch:
+- `.claude/skills/create-spec/references/agents/parse-directive-validator.md` (observe `END-OF-PARSE-DIRECTIVE-VALIDATOR-SENTINEL`)
 
-1. Issue the `function_template` exactly as written (substitute `%d` / `%s` placeholders with a reasonable value — the latest block number for `GET_BLOCK_BY_NUM`, a dummy subscription ID for `UNSUBSCRIBE`).
-2. Capture the response.
-3. Walk through `result_parsing.parser_arg` using `result_parsing.parser_func` semantics (consult `references/appendix-reference-tables.md` for the exact semantics of `PARSE_BY_ARG`, `PARSE_CANONICAL`, `PARSE_DICTIONARY_OR_ORDERED`, `EMPTY`, `DEFAULT`).
-4. Verify the extracted value type matches the directive's `function_tag`:
-   - `GET_BLOCKNUM` → must extract a positive integer or hex-int (whatever encoding the directive declares)
-   - `GET_BLOCK_BY_NUM` → extraction target is typically a block hash / digest — must extract a string-typed identifier
-   - `GET_EARLIEST_BLOCK` → must extract a positive integer ≤ the `GET_BLOCKNUM` result
-   - `VERIFICATION` (chain-id) → extracted value MUST match the verification's `expected_value`
-   - `SUBSCRIBE` / `UNSUBSCRIBE` → cannot fully validate without WebSocket (Phase 8 covers this); structural-only check here
+**Inputs to substitute** (gather from earlier phases — do NOT re-research):
+- `<spec_path>` — `specs/testnet-2/specs/<chain>.json`
+- `<chain>` — lowercased chain name (filename stem)
+- `<INDEX>` — spec index UPPERCASE
+- `<api_interface>` — from the spec's primary `api_collections[].collection_data.api_interface`
+- `<chain_family>` — from `upstream-spec-scout`'s ecosystem classification (`evm`, `solana`, `cosmos`, or other)
+- `<mainnet_rpc_url>` — any public mainnet RPC URL from Phase 2 (empty string if none available; Layer 3 will skip)
+- `<has_archive>` — `true` if any collection has an `archive` extension, else `false`
+- `<has_websocket>` — `true` if the chain has SUBSCRIBE/UNSUBSCRIBE directives in scope, else `false`
 
-Show the user, for each directive: (a) the request issued, (b) the raw response, (c) the extracted value, (d) PASS/FAIL.
+**Dispatch ONE Agent subagent** with `subagent_type: general-purpose` (no `isolation`).
 
-If any directive FAILS:
-- **Wrong `api_name`** (response is `-32601` method not found): swap the api_name; the orchestrator MUST cross-check against the chain's documented method that actually returns the needed data.
-- **Wrong `parser_arg` path** (extraction yields `null` or wrong-typed value): re-walk the response and correct the path.
-- **Wrong `function_template`** (response is parse error or empty): correct the JSON-RPC params shape.
-- **Wrong directive choice entirely** (e.g., a method returns node-local data instead of chain-wide data): pick a different `api_name` that returns the right kind of data.
+```
+Agent(description: "Validate parse_directives for <chain>",
+      subagent_type: "general-purpose",
+      prompt: <parse-directive-validator.md with placeholders substituted>)
+```
 
-Do NOT proceed to Phase 7 with any FAIL outstanding.
+When the subagent returns, expect a structured report with sections `=== LAYER 1 ===`, `=== LAYER 2 ===`, `=== LAYER 3 ===`, `=== SUMMARY ===` (final line `RESULT: PASS` or `RESULT: FAIL`).
+
+- `RESULT: PASS` → proceed to Phase 7 (Write).
+- `RESULT: FAIL` → surface the full agent report to the user; STOP. Do not call Write. Fix the spec per the failing-layer details and re-run this gate.
 
 ## Phase 7 — Write & autonomous jq validation
 

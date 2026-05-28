@@ -1,0 +1,22 @@
+{
+  "proposal": {
+    "specs": [
+      {
+        "index": "BADCHAIN",
+        "api_collections": [
+          {
+            "collection_data": {"api_interface": "jsonrpc"},
+            "parse_directives": [],
+            "verifications": [
+              {
+                "name": "chain-id",
+                "values": [{"expected_value": ""}],
+                "severity": "Whoops"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

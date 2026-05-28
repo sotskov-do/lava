@@ -10,6 +10,7 @@ Scout the Lava specs repository for existing specs that can serve as a base temp
 
 - `chain_name`: The name of the blockchain (e.g., "Ethereum", "Polygon", "Cosmos Hub")
 - `public_repo_path`: Local file path to the public Magma-Devs/lava-specs repository (e.g., `/path/to/lava-specs`)
+- `chain_index_lower`: The mainnet spec index lowercased (e.g., `iota`, `polygon`) — used to name the directives-list output file.
 
 ## Core Instructions
 
@@ -241,6 +242,38 @@ Cosmos SDK chains have version-specific specs:
 - COSMOSSDK50 (current, v0.50+)
 
 **Recommendation:** Always recommend latest stable version unless target chain requires older SDK.
+
+## Required side-effect: write a directives file when a template is found
+
+When you identify ONE template spec as the recommended ecosystem match (an Exact Match or a Closest Match you would recommend the orchestrator import from), you MUST also write a plain-text directives file at `/tmp/<chain_index_lower>_directives.txt`. This is the input to `compare_spec_directives.sh`, which is the Layer 2 mechanism used by the `parse-directive-validator` subagent in Phase 6 of `/create-spec`.
+
+- **Path:** `/tmp/<chain_index_lower>_directives.txt` (e.g., `/tmp/iota_directives.txt`)
+- **Format:** one row per `parse_directive` in the recommended template's MAIN collection (the collection with no `add_on`, matching the chain's primary `api_interface`). Pipe-separated:
+
+  ```
+  <function_tag>|<api_name>|<sha256_of_function_template>
+  ```
+
+  Where the hash is the sha256 of the directive's `function_template` string verbatim (no whitespace stripping). If `function_template` is null, write the literal string `null` in place of the hash.
+
+- **Extraction command** (substitute `<template_path>` and `<chain_index_lower>`):
+
+  ```bash
+  jq -r '
+    .proposal.specs[0].api_collections[]
+    | select((.collection_data.add_on // "") == "")
+    | .parse_directives[]?
+    | "\(.function_tag)|\(.api_name // "")|\(.function_template // "null")"
+  ' <template_path> \
+  | while IFS='|' read -r tag api tmpl; do
+      if [ "$tmpl" = "null" ]; then h="null"; else h=$(printf '%s' "$tmpl" | sha256sum | awk '{print $1}'); fi
+      echo "$tag|$api|$h"
+    done > /tmp/<chain_index_lower>_directives.txt
+  ```
+
+- **When to skip:** if no template is identified (no Exact Match and no Closest Match strong enough to recommend), do NOT write the file. The validator agent will skip Layer 2 when the file is absent; this is the expected fallback.
+
+After writing, run `wc -l /tmp/<chain_index_lower>_directives.txt` and include the line count in your structured output so the orchestrator can verify the file was emitted.
 
 ## Quality Standards
 
