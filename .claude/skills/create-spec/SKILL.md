@@ -227,50 +227,35 @@ Every method in `/tmp/additions.txt` MUST appear in the child spec. Commonly mis
 
 Output the diff results and probe results verbatim to the user before proceeding.
 
-## Phase 6 — Completeness checklist
+## Phase 6 — Static validation gates (parallel dispatch + single-pass fixer)
 
-Walk the extended completeness checklist below. For each item, either confirm or fix inline before proceeding to Phase 7. Items marked **GATE** are hard refuse-to-write gates: if not satisfied, you MUST NOT call Write until they are fixed.
+This phase runs 7 deterministic static-check gates in parallel and, on any failure, dispatches a single fixer subagent to apply edits before proceeding to Phase 7. Phase 9's parallel reviewers + Phase 11's final reviewer catch any residual issues from the fixer.
+
+### Pre-flight checklist (informational; the gates below are authoritative)
+
+Walk this checklist to confirm the orchestrator's working state. The first four bullets surface as gate failures below; the last two are NOT covered by any validator and must be hand-checked here:
 
 - `index` is uppercase, unique, matches the chain
 - `name`, `enabled`, `min_stake_provider`, `shares` present at top level of each spec entry
-- `average_block_time` sourced from docs OR empirically measured (cite which)
-- `block_distance_for_finalized_data` sourced from official finality docs
-- `blocks_in_finalization_proof` = `max(ceil(1000 / average_block_time), 3)` — verify computed value matches Phase 4 table
-- `allowed_block_lag_for_qos_sync` = `max(ceil(10000 / average_block_time), 1)` — verify computed value matches Phase 4 table
-- `reliability_threshold: 268435455`, `data_reliability_enabled: true`
-- If `imports` is set, Phase 5's audit was performed and its outputs were shown to the user
-- All methods from api-docs-researcher's report appear in the spec
-- Every addon has a matching `verifications` block
-- SUBSCRIBE / UNSUBSCRIBE share `local` and `stateful` flags
-- Stateful APIs only mark broadcast/state-modifying methods
-- Every `hanging_api: true` API has an explicit `timeout_ms`
-- Every API has `name`, `enabled`, `compute_units`, `block_parsing`, `category`
 - `chain-id` `expected_value` obtained from a **live curl** against the mainnet RPC (not converted from a docs decimal)
 - Testnet entry's `chain-id` `expected_value` obtained from a live curl against the testnet RPC
-- Every `parser_arg` is an array of strings
-- No duplicate API `name` within a single collection
+- Every API with `category.hanging_api: true` has an explicit `timeout_ms` (no validator covers this — confirm by running `jq -r '.proposal.specs[].api_collections[].apis[] | select(.category.hanging_api == true and (.timeout_ms // null) == null) | .name' specs/testnet-2/specs/<chain>.json` and confirming the output is empty)
+- `category.stateful` is set only on broadcast / state-modifying methods (read methods must have `stateful: 0` or unset; no validator enforces direction — spot-check the spec's stateful methods against the chain's docs)
 
-### GATE — Methods coverage (scout list diff)
-
-Confirm the candidate spec covers every method `api-docs-researcher` discovered. Run the deterministic diff against the scout's `/tmp/<chain_index_lower>_methods.txt` (written in Phase 3):
+For the chain-id curl step, run this for both mainnet and testnet:
 
 ```bash
-CAND=specs/testnet-2/specs/<chain>.json
-bash .claude/skills/create-spec/scripts/compare_spec_methods.sh \
-  "$CAND" \
-  /tmp/<chain_index_lower>_methods.txt
+curl -s -X POST -H "Content-Type: application/json" \
+  --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
+  <mainnet_rpc_url>
+# For non-EVM chains, use the chain's equivalent (e.g., iota_getChainIdentifier).
 ```
 
-The script walks `.imports[]` transitively and emits `=== PRESENT ===`, `=== MISSING ===`, and `=== EXTRA IN SPEC ===` sections.
+Capture the returned hex value VERBATIM into the spec's `verifications[].values[0].expected_value`. Show the response to the user.
 
-- `=== MISSING ===` must be empty, OR each missing method must have an explicit allowed-omission reason from this set: `deprecated`, `admin-only`, `platform-specific (e.g., GraphQL-only)`, `empirically absent (curl returned -32601 against <node_url>)`. Any unjustified missing method → REFUSE-TO-WRITE. Restore the method to the spec (or document the omission reason inline above the spec block in the orchestrator's response) before proceeding.
-- `=== EXTRA IN SPEC ===` is informational — a child spec can legitimately add chain-specific methods.
+### Archive ↔ pruning ↔ GET_EARLIEST_BLOCK triplet (inline pre-flight)
 
-If `/tmp/<chain_index_lower>_methods.txt` is missing (scout step failed in Phase 3), STOP and re-run the api-docs-researcher dispatch — do NOT proceed without the ground-truth list.
-
-### GATE — Archive ↔ pruning ↔ GET_EARLIEST_BLOCK consistency
-
-For each spec entry: `archive` extension, `pruning` verification, and `GET_EARLIEST_BLOCK` parse_directive are an indivisible triplet. They are all present or all absent. The canonical structure of each lives in `references/phase3.4-parse-directives-and-extensions.md`.
+For each spec entry: `archive` extension, `pruning` verification, and `GET_EARLIEST_BLOCK` parse_directive are an indivisible triplet — all present or all absent. The canonical structure of each lives in `references/phase3.4-parse-directives-and-extensions.md`.
 
 ```bash
 CAND=specs/testnet-2/specs/<chain>.json
@@ -282,63 +267,71 @@ jq '.proposal.specs[] | {
 }' "$CAND"
 ```
 
-For each entry, the three booleans must be all `true` or all `false`. Any mixed row → STOP, fix by reading `references/phase3.4-...md` and adding the missing element(s). Do NOT call Write while mixed.
+For each entry, the three booleans must be all `true` or all `false`. Any mixed row → STOP, fix by reading `references/phase3.4-...md` and adding the missing element(s).
 
-### GATE — Template-shape diff (if scout returned a template)
+### Parallel static gates dispatch
 
-If `upstream-spec-scout` recommended a template spec from the working tree, run a structural diff to catch silent drops. Skip this gate when there is no template.
+Read each validator agent prompt fully (full-read with sentinel verification) before dispatch:
 
-```bash
-TPL=<template-path>   # e.g., specs/testnet-2/specs/sui.json
-for axis in 'extensions[]?.name' 'verifications[]?.name'; do
-  echo "--- $axis ---"
-  diff <(jq -r "[.proposal.specs[0].api_collections[].${axis}] | unique[]" "$TPL") \
-       <(jq -r "[.proposal.specs[0].api_collections[].${axis}] | unique[]" "$CAND")
-done
-```
-
-Any `<` line is a template element missing from the candidate — restore per references. Any `>` line is candidate-only and must be defensible (chain-specific extension, justified by the chain's docs).
-
-For the chain-id curl step, run this for both mainnet and testnet:
-
-```bash
-curl -s -X POST -H "Content-Type: application/json" \
-  --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
-  <mainnet_rpc_url>
-# For non-EVM chains, use the chain's equivalent (e.g., iota_getChainIdentifier).
-```
-
-Capture the returned hex value VERBATIM and put it in the spec's `verifications[].values[0].expected_value`. Show the response to the user. Do not convert from a decimal in the docs — hex/decimal typos are a common spec-failure cause.
-
-### GATE — Parse directives (delegated subagent)
-
-This gate is delegated to a single `general-purpose` subagent (`parse-directive-validator`) that owns three layers: a static canonical-matrix check, a scout-emitted directives diff (`compare_spec_directives.sh`), and live RPC validation. The orchestrator reads only the agent's structured summary.
-
-**Read the agent prompt fully** before dispatch:
+- `.claude/skills/create-spec/references/agents/methods-coverage-validator.md` (observe `END-OF-METHODS-COVERAGE-VALIDATOR-SENTINEL`)
 - `.claude/skills/create-spec/references/agents/parse-directive-validator.md` (observe `END-OF-PARSE-DIRECTIVE-VALIDATOR-SENTINEL`)
+- `.claude/skills/create-spec/references/agents/chain-metadata-validator.md` (observe `END-OF-CHAIN-METADATA-VALIDATOR-SENTINEL`)
+- `.claude/skills/create-spec/references/agents/verifications-validator.md` (observe `END-OF-VERIFICATIONS-VALIDATOR-SENTINEL`)
+- `.claude/skills/create-spec/references/agents/extensions-validator.md` (observe `END-OF-EXTENSIONS-VALIDATOR-SENTINEL`)
+- `.claude/skills/create-spec/references/agents/cu-consistency-validator.md` (observe `END-OF-CU-CONSISTENCY-VALIDATOR-SENTINEL`)
+- `.claude/skills/create-spec/references/agents/method-schema-validator.md` (observe `END-OF-METHOD-SCHEMA-VALIDATOR-SENTINEL`)
 
-**Inputs to substitute** (gather from earlier phases — do NOT re-research):
+Gather inputs:
 - `<spec_path>` — `specs/testnet-2/specs/<chain>.json`
 - `<chain>` — lowercased chain name (filename stem)
 - `<INDEX>` — spec index UPPERCASE
 - `<api_interface>` — from the spec's primary `api_collections[].collection_data.api_interface`
 - `<chain_family>` — from `upstream-spec-scout`'s ecosystem classification (`evm`, `solana`, `cosmos`, or other)
-- `<mainnet_rpc_url>` — any public mainnet RPC URL from Phase 2 (empty string if none available; Layer 3 will skip)
+- `<mainnet_rpc_url>` — public mainnet RPC URL (empty if none; parse-directive Layer 3 will skip)
 - `<has_archive>` — `true` if any collection has an `archive` extension, else `false`
-- `<has_websocket>` — `true` if the chain has SUBSCRIBE/UNSUBSCRIBE directives in scope, else `false`
+- `<has_websocket>` — `true` if the chain has SUBSCRIBE/UNSUBSCRIBE directives, else `false`
+- `<methods_file>` — `/tmp/<chain_index_lower>_methods.txt`
 
-**Dispatch ONE Agent subagent** with `subagent_type: general-purpose` (no `isolation`).
+**Dispatch all 7 in a single message, each with `subagent_type: general-purpose`, `run_in_background: true`, NO `isolation`:**
 
 ```
-Agent(description: "Validate parse_directives for <chain>",
-      subagent_type: "general-purpose",
-      prompt: <parse-directive-validator.md with placeholders substituted>)
+Agent(description: "Gate: methods coverage", subagent_type: "general-purpose", run_in_background: true, prompt: <methods-coverage-validator.md with placeholders substituted>)
+Agent(description: "Gate: parse directives", subagent_type: "general-purpose", run_in_background: true, prompt: <parse-directive-validator.md with placeholders substituted>)
+Agent(description: "Gate: chain metadata", subagent_type: "general-purpose", run_in_background: true, prompt: <chain-metadata-validator.md with placeholders substituted>)
+Agent(description: "Gate: verifications", subagent_type: "general-purpose", run_in_background: true, prompt: <verifications-validator.md with placeholders substituted>)
+Agent(description: "Gate: extensions", subagent_type: "general-purpose", run_in_background: true, prompt: <extensions-validator.md with placeholders substituted>)
+Agent(description: "Gate: cu consistency", subagent_type: "general-purpose", run_in_background: true, prompt: <cu-consistency-validator.md with placeholders substituted>)
+Agent(description: "Gate: method schema", subagent_type: "general-purpose", run_in_background: true, prompt: <method-schema-validator.md with placeholders substituted>)
 ```
 
-When the subagent returns, expect a structured report with sections `=== LAYER 1 ===`, `=== LAYER 2 ===`, `=== LAYER 3 ===`, `=== SUMMARY ===` (final line `RESULT: PASS` or `RESULT: FAIL`).
+### Aggregate + single-pass fixer
 
-- `RESULT: PASS` → proceed to Phase 7 (Write).
-- `RESULT: FAIL` → surface the full agent report to the user; STOP. Do not call Write. Fix the spec per the failing-layer details and re-run this gate.
+Wait for all 7 subagents to return. Parse each one's last `RESULT: PASS | FAIL` line.
+
+**If all 7 RESULTS are PASS**: print a single-line summary to the user (`Phase 6: all 7 gates PASS`) and proceed to Phase 7.
+
+**If any RESULT is FAIL**:
+
+1. Print to the user the aggregated report — one section per failed gate, with the `=== GATE: <name> ===` block from that subagent's response.
+2. Dispatch one `general-purpose` fixer subagent with the deduplicated FAIL list. Prompt:
+
+   > You are fixing a Lava blockchain spec. Read `specs/testnet-2/specs/<chain>.json` and the deduplicated FAIL list below from Phase 6's parallel-gate run. Apply EVERY listed fix in one pass. Do not touch any field not mentioned in the FAIL list. Do not refactor, reformat, or improve adjacent fields.
+   >
+   > [paste deduplicated FAIL list with the per-gate sections from the parallel-gate reports]
+   >
+   > Return a markdown summary of every change in the format:
+   > `- <gate>:<row> — <one-sentence description of fix>`
+
+3. After the fixer returns, validate JSON again:
+
+   ```bash
+   jq . specs/testnet-2/specs/<chain>.json > /dev/null
+   echo "jq exit: $?"
+   ```
+
+   If exit non-zero, present the snapshot path, the `jq` error, and the fixer's diff to the user. STOP.
+
+4. Do NOT re-run the validators — Phase 9's parallel reviewers and Phase 11's final reviewer catch any residual issues. Proceed to Phase 7.
 
 ## Phase 7 — Write & autonomous jq validation
 
