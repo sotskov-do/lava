@@ -54,31 +54,43 @@ Ask the user only for what they alone can decide. Do not guess defaults:
 
 If the user is vague ("add Polygon"), ask. Don't proceed until you have at minimum the chain name, mainnet index, and testnet index.
 
-## Phase 3 — Parallel research (4 background agents)
+## Phase 3 — Parallel research (5 background agents)
 
 Before dispatching, read `references/phase1-research.md` end-to-end (full-read, observe `END-OF-PHASE1-SENTINEL`). It contains the blockchain-analysis framework, third-party-API decision tree, index-naming conventions, and API-discovery patterns that inform how to brief the research agents. Subagents will not read this file themselves — you (the orchestrator) extract the relevant context from it and weave it into each agent prompt's `{chain_name}`, `{docs_url}`, etc. substitutions.
 
-Dispatch four research agents in parallel via a SINGLE message with four Agent tool calls. Each agent runs in the background (`run_in_background: true`) and uses `subagent_type: general-purpose`.
+Dispatch five research agents in parallel via a SINGLE message with five Agent tool calls. Each agent runs in the background (`run_in_background: true`) and uses `subagent_type: general-purpose`.
 
-Read the four agent prompt files first (full-read with sentinel verification, where applicable):
+Read the five agent prompt files first (full-read with sentinel verification, where applicable):
 
 - `.claude/skills/create-spec/references/agents/api-docs-researcher.md`
 - `.claude/skills/create-spec/references/agents/chain-metadata-researcher.md` (observe `END-OF-AGENT-CHAIN-METADATA-SENTINEL`)
 - `.claude/skills/create-spec/references/agents/upstream-spec-scout.md`
 - `.claude/skills/create-spec/references/agents/plugin-researcher.md`
+- `.claude/skills/create-spec/references/agents/archive-researcher.md` (observe `END-OF-ARCHIVE-RESEARCHER-SENTINEL`)
 
-Substitute placeholders (`{chain_name}`, `{chain_index_lower}`, `{docs_url}`, `{mainnet_indices_or_known_parents}`, `{public_repo_path}`) with the values gathered in Phase 2 plus any heuristics. `{chain_index_lower}` is the mainnet index lowercased (e.g., `iota` for `IOTA`); it is passed to BOTH `api-docs-researcher` (which names `/tmp/<chain_index_lower>_methods.txt`) AND `upstream-spec-scout` (which names `/tmp/<chain_index_lower>_directives.txt` when a template is found). `{public_repo_path}` is empty unless the user has resolved a lava-specs clone.
+Substitute placeholders (`{chain_name}`, `{chain_index_lower}`, `{docs_url}`, `{mainnet_indices_or_known_parents}`, `{public_repo_path}`) with the values gathered in Phase 2 plus any heuristics. `{chain_index_lower}` is the mainnet index lowercased (e.g., `iota` for `IOTA`); it is passed to BOTH `api-docs-researcher` (which names `/tmp/<chain_index_lower>_methods.txt`) AND `upstream-spec-scout` (which names `/tmp/<chain_index_lower>_directives.txt` when a template is found). `{public_repo_path}` is empty unless the user has resolved a lava-specs clone. `{mainnet_rpc_url}` and `{testnet_rpc_url}` are the primary live RPC URLs gathered in Phase 2; pass them to `archive-researcher` for its Layer 2 live probe (empty string if a network has no public RPC). `{chain_family}` and `{api_interface}` are also gathered in Phase 2; pass them to `archive-researcher` so it picks the correct per-family probe recipe.
 
-Dispatch all four in a single message:
+Dispatch all five in a single message:
 
 ```
 Agent(description: "Research api-docs for {chain}", subagent_type: "general-purpose", run_in_background: true, prompt: <api-docs-researcher.md with placeholders substituted>)
 Agent(description: "Research chain metadata for {chain}", subagent_type: "general-purpose", run_in_background: true, prompt: <chain-metadata-researcher.md with placeholders substituted>)
 Agent(description: "Find upstream parent spec for {chain}", subagent_type: "general-purpose", run_in_background: true, prompt: <upstream-spec-scout.md with placeholders substituted>)
 Agent(description: "Detect plugins/extensions for {chain}", subagent_type: "general-purpose", run_in_background: true, prompt: <plugin-researcher.md with placeholders substituted>)
+Agent(description: "Research archive/prune for {chain}", subagent_type: "general-purpose", run_in_background: true, prompt: <archive-researcher.md with placeholders substituted>)
 ```
 
-When all four agents complete (you will receive notifications), collect their reports and proceed to Phase 4.
+When all five agents complete (you will receive notifications), collect their reports.
+
+**Before proceeding to Phase 4, print the archive-researcher's full report to the user verbatim — copy the entire block between `=== ARCHIVE RESEARCHER ===` and `END-OF-ARCHIVE-RESEARCHER-SENTINEL` into your response. Do NOT paraphrase, summarize, or condense any section.**
+
+**If the archive-researcher's report is missing the `=== ARCHIVE RESEARCHER ===` start marker, missing the `END-OF-ARCHIVE-RESEARCHER-SENTINEL` end marker, or has no `SUMMARY: status:` line**, re-dispatch the archive-researcher with explicit instructions to emit the full output template (Sources, Doc-mined defaults, Live probe results, Recommendation, Conflicts, and SUMMARY) before returning. Do not proceed to Phase 4 with a malformed report.
+
+**On `status: NEEDS_HUMAN_DECISION`**: STOP. Quote the `## Conflicts` section and any Recommendation rows marked `chain-discretion` from the report you just printed, and ask the user to make a call on each — specifically: (a) include or omit the `archive` extension on mainnet, (b) include or omit on testnet, (c) the `rule.block` value if mainnet uses archive, (d) the `pruning` verification `expected_value` if it isn't `*`. Record their decisions and use them as Phase-3 inputs when proceeding to Phase 4.
+
+**On `status: OK`**: keep the `## Recommendation` block in working memory and consult it when constructing the spec in Phase 4 — specifically, it determines (a) whether the spec's mainnet entry includes an `archive` extension on the primary api_collection, (b) whether the testnet entry does, (c) the `rule.block` integer value on any archive extension, and (d) the `pruning` verification's `values[0].expected_value` (almost always `"*"`).
+
+Then proceed to Phase 4.
 
 If the upstream-spec-scout agent reports that no lava-specs clone was resolved, treat its output as empty (no parent-spec hints) and continue.
 
