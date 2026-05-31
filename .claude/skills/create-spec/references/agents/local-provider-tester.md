@@ -58,9 +58,21 @@ python3 -c 'import yaml,sys; yaml.safe_load(open("testutil/debugging/logs/<chain
 
 Run the script in the FOREGROUND (the script itself daemonizes the provider via `screen`; you must wait for the script to finish its setup work before probing).
 
+**Build the spec CSV (parent-first).** Inspect the candidate's `imports` field:
+
 ```bash
+jq -r '[.proposal.specs[].imports? // empty] | flatten | unique | join("\n")' specs/testnet-2/specs/<chain>.json
+```
+
+For each imported parent index, locate its spec file (search `specs/mainnet-1/specs/` then `specs/testnet-2/specs/`) and prepend it to the CSV, parents before children (a parent that itself imports must come first). Substitute the comma-terminated result for `<PARENT_SPECS_CSV_PARENT_FIRST>` (empty string if there are no imports). Example for a chain importing `ETH1`: `specs/mainnet-1/specs/ethereum.json,specs/testnet-2/specs/<chain>.json`.
+
+```bash
+# The first argument is a CSV of spec files. When the candidate spec has `imports`,
+# every parent spec MUST appear BEFORE the child, or `ExpandSpec` fails at boot.
+# Build the CSV parent-first: <parent specs, in dependency order>,<child spec>.
+# If the candidate has no `imports`, the CSV is just the child spec.
 ./scripts/pre_setups/init_chain_only_with_node.sh \
-  specs/testnet-2/specs/<chain>.json \
+  <PARENT_SPECS_CSV_PARENT_FIRST>specs/testnet-2/specs/<chain>.json \
   <INDEX> \
   <INTERFACE> \
   testutil/debugging/logs/<chain>_provider.yml
@@ -98,8 +110,8 @@ For every API in every collection of the current spec variant:
 | Category | Probe action |
 |---|---|
 | `category.stateful: 1` | SKIP. Record reason: "stateful — would broadcast transaction". |
-| `category.subscription: true` | Open WS to `<NODE_URL>` (use the `wss://` entry from the provider config), send the subscribe call with sample params from the spec's `parse_directive` or `block_parsing` hints, **wait up to 30 seconds for at least one message**, then send unsubscribe. PASS = ≥1 message received. FAIL = timeout. |
-| Anything else | Build the simplest valid call from `block_parsing` + `parse_directive` hints. Send it directly to each of the 2–3 `node-urls` URLs (NOT through the lava consumer). Classify. |
+| `category.subscription: true` | Open a WebSocket to the **local consumer** (`ws://127.0.0.1:3360/<api_interface>` — confirm the consumer ws path in CONSUMERS.log), send the subscribe call with sample params from the spec's `parse_directive` or `block_parsing` hints, **wait up to 30 seconds for at least one message**, then send unsubscribe. PASS = ≥1 message received. FAIL = timeout. Probe via the consumer, not the upstream node. |
+| Anything else | Build the simplest valid call from `block_parsing` + `parse_directive` hints. Send it **through the local lava consumer at `127.0.0.1:3360`** (the boot script's hardcoded consumer listener — confirm in CONSUMERS.log), NOT directly to the upstream `node-urls`. In production all traffic flows through the consumer, so this is the only representative path: it exercises consumer → provider → node and surfaces spec-level parse/result-directive bugs that a direct-to-node call would hide. Classify the consumer's response. |
 
 Response classification:
 - Response with `result` field (any value, including empty) → **PASS** (method exists and responded).

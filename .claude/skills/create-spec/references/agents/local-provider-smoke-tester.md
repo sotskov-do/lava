@@ -17,9 +17,14 @@ You are a subagent dispatched by the create-spec orchestrator to re-boot the loc
 
 Re-invoke `scripts/pre_setups/init_chain_only_with_node.sh` for each `(spec_variant, api_interface)` pair, using the EXISTING provider config file from Phase 8 (do not regenerate it — the same node URLs apply). The script wipes existing screens and logs at startup (`killall screen; screen -wipe; rm $LOGS_DIR/*.log`), then re-runs the full bootstrap: `make install-all` → start a fresh lava node → submit and pass a spec-add gov proposal using the updated spec file on disk (this picks up Phase 10's fixes automatically) → submit and pass plans-add → stake provider → spawn `provider1` + `consumers` screens.
 
+Build the spec CSV parent-first, exactly as in Phase 8 (`local-provider-tester`): if the candidate has `imports`, prepend every parent spec file (parents before children) and substitute the comma-terminated list for `<PARENT_SPECS_CSV_PARENT_FIRST>` (empty string if no imports), or `ExpandSpec` fails at boot.
+
 ```bash
+jq -r '[.proposal.specs[].imports? // empty] | flatten | unique | join("\n")' specs/testnet-2/specs/<chain>.json
+
+# The first argument is a parent-first CSV of spec files (child last).
 ./scripts/pre_setups/init_chain_only_with_node.sh \
-  specs/testnet-2/specs/<chain>.json \
+  <PARENT_SPECS_CSV_PARENT_FIRST>specs/testnet-2/specs/<chain>.json \
   <INDEX> \
   <INTERFACE> \
   testutil/debugging/logs/<chain>_provider.yml
@@ -38,6 +43,8 @@ Probe these exactly, in order:
 1. `GET_BLOCKNUM` parse directive — same call as Phase 8.
 2. `chain-id` verification — call the verification method and confirm response matches the spec's `expected_value`.
 3. **5 sampled read methods** — deterministically the first 5 non-stateful, non-subscription APIs (alphabetical by name) from the largest collection.
+
+Send every probe **through the local lava consumer at `127.0.0.1:3360`** (subscriptions via `ws://127.0.0.1:3360/<api_interface>`), exactly as Phase 8 does — NOT directly to the upstream `node-urls`. In production all traffic flows through the consumer, so this is the only representative path.
 
 Classify each result using the same scheme as Phase 8 (PASS / FAIL / SKIP / WARN / TIMEOUT).
 

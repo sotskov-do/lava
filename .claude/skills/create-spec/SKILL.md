@@ -241,7 +241,7 @@ Output the diff results and probe results verbatim to the user before proceeding
 
 ## Phase 6 — Static validation gates (parallel dispatch + single-pass fixer)
 
-This phase runs 7 deterministic static-check gates in parallel and, on any failure, dispatches a single fixer subagent to apply edits before proceeding to Phase 7. Phase 9's parallel reviewers + Phase 11's final reviewer catch any residual issues from the fixer.
+This phase runs 9 deterministic static-check gates in parallel and, on any failure, dispatches a single fixer subagent to apply edits before proceeding to Phase 7. Phase 9's parallel reviewers + Phase 11's final reviewer catch any residual issues from the fixer.
 
 ### Pre-flight checklist (informational; the gates below are authoritative)
 
@@ -290,7 +290,9 @@ Read each validator agent prompt fully (full-read with sentinel verification) be
 - `.claude/skills/create-spec/references/agents/chain-metadata-validator.md` (observe `END-OF-CHAIN-METADATA-VALIDATOR-SENTINEL`)
 - `.claude/skills/create-spec/references/agents/verifications-validator.md` (observe `END-OF-VERIFICATIONS-VALIDATOR-SENTINEL`)
 - `.claude/skills/create-spec/references/agents/extensions-validator.md` (observe `END-OF-EXTENSIONS-VALIDATOR-SENTINEL`)
-- `.claude/skills/create-spec/references/agents/cu-consistency-validator.md` (observe `END-OF-CU-CONSISTENCY-VALIDATOR-SENTINEL`)
+- `.claude/skills/create-spec/references/agents/cu-semantic-validator.md` (observe `END-OF-CU-SEMANTIC-VALIDATOR-SENTINEL`)
+- `.claude/skills/create-spec/references/agents/pruning-validator.md` (observe `END-OF-PRUNING-VALIDATOR-SENTINEL`)
+- `.claude/skills/create-spec/references/agents/enabled-validator.md` (observe `END-OF-ENABLED-VALIDATOR-SENTINEL`)
 - `.claude/skills/create-spec/references/agents/method-schema-validator.md` (observe `END-OF-METHOD-SCHEMA-VALIDATOR-SENTINEL`)
 
 Gather inputs:
@@ -303,8 +305,10 @@ Gather inputs:
 - `<has_archive>` — `true` if any collection has an `archive` extension, else `false`
 - `<has_websocket>` — `true` if the chain has SUBSCRIBE/UNSUBSCRIBE directives, else `false`
 - `<methods_file>` — `/tmp/<chain_index_lower>_methods.txt`
+- `<retention_blocks>` — integer block count from archive-researcher's `retention_blocks` output, or the literal `unknown`. Passed to `pruning-validator`.
+- `<research_unsupported>` — distilled list of methods research explicitly flagged unsupported/deprecated/`-32601` (from api-docs-researcher / plugin-researcher reports). May be empty. Passed to `enabled-validator`.
 
-**Dispatch all 7 in a single message, each with `subagent_type: general-purpose`, `run_in_background: true`, NO `isolation`:**
+**Dispatch all 9 in a single message, each with `subagent_type: general-purpose`, `run_in_background: true`, NO `isolation`:**
 
 ```
 Agent(description: "Gate: methods coverage", subagent_type: "general-purpose", run_in_background: true, prompt: <methods-coverage-validator.md with placeholders substituted>)
@@ -312,15 +316,24 @@ Agent(description: "Gate: parse directives", subagent_type: "general-purpose", r
 Agent(description: "Gate: chain metadata", subagent_type: "general-purpose", run_in_background: true, prompt: <chain-metadata-validator.md with placeholders substituted>)
 Agent(description: "Gate: verifications", subagent_type: "general-purpose", run_in_background: true, prompt: <verifications-validator.md with placeholders substituted>)
 Agent(description: "Gate: extensions", subagent_type: "general-purpose", run_in_background: true, prompt: <extensions-validator.md with placeholders substituted>)
-Agent(description: "Gate: cu consistency", subagent_type: "general-purpose", run_in_background: true, prompt: <cu-consistency-validator.md with placeholders substituted>)
+Agent(description: "Gate: cu semantic", subagent_type: "general-purpose", run_in_background: true, prompt: <cu-semantic-validator.md with placeholders substituted>)
+Agent(description: "Gate: pruning", subagent_type: "general-purpose", run_in_background: true, prompt: <pruning-validator.md with placeholders substituted>)
+Agent(description: "Gate: enabled", subagent_type: "general-purpose", run_in_background: true, prompt: <enabled-validator.md with placeholders substituted>)
 Agent(description: "Gate: method schema", subagent_type: "general-purpose", run_in_background: true, prompt: <method-schema-validator.md with placeholders substituted>)
 ```
 
 ### Aggregate + single-pass fixer
 
-Wait for all 7 subagents to return. Parse each one's last `RESULT: PASS | FAIL` line.
+Wait for all 9 subagents to return. Parse each one's last `RESULT: PASS | FAIL` line.
 
-**If all 7 RESULTS are PASS**: print a single-line summary to the user (`Phase 6: all 7 gates PASS`) and proceed to Phase 7.
+**Severity routing.** Three of the nine gates emit ADVISORY findings in addition to their `RESULT` line:
+- `cu-semantic` — its Layer-2 ADVISORY rows (out-of-band CU). These DO feed the fixer as suggested CU adjustments.
+- `enabled` — its WATCH-LIST rows. These do NOT feed the fixer (never auto-disable — free-tier caveat). Print them to the user and carry them into Phase 8 as a probe watch-list.
+- `pruning` — when it prints `INFO: retention unknown`, treat as PASS (no fix); print the INFO to the user.
+
+A gate's `RESULT: FAIL` (cu-semantic Layer-1 anomaly, pruning >3× off, or any existing hard gate) routes to the fixer as a must-fix. The `enabled` gate's `RESULT` is always PASS.
+
+**If all 9 RESULTS are PASS**: print a single-line summary to the user (`Phase 6: all 9 gates PASS`) and proceed to Phase 7 (still printing any advisory cu-semantic / enabled-watch-list rows).
 
 **If any RESULT is FAIL**:
 
@@ -330,6 +343,9 @@ Wait for all 7 subagents to return. Parse each one's last `RESULT: PASS | FAIL` 
    > You are fixing a Lava blockchain spec. Read `specs/testnet-2/specs/<chain>.json` and the deduplicated FAIL list below from Phase 6's parallel-gate run. Apply EVERY listed fix in one pass. Do not touch any field not mentioned in the FAIL list. Do not refactor, reformat, or improve adjacent fields.
    >
    > [paste deduplicated FAIL list with the per-gate sections from the parallel-gate reports]
+   >
+   > In addition to the FAIL list, the following are ADVISORY CU suggestions from the cu-semantic gate — apply them ONLY if they are clearly correct (a method's CU obviously outside its semantic band); skip any you are unsure about:
+   > [paste cu-semantic Layer-2 ADVISORY rows, or "none"]
    >
    > Return a markdown summary of every change in the format:
    > `- <gate>:<row> — <one-sentence description of fix>`
@@ -388,11 +404,13 @@ This phase is delegated to a single `general-purpose` subagent so the orchestrat
 - `<chain>` — lowercased chain name (filename stem, e.g., `iota`)
 - `<INDEX>` — spec index UPPERCASE (e.g., `IOTA`)
 - `<INTERFACE>` — `jsonrpc` | `rest` | `grpc` | `tendermintrpc` (the spec's `api_collections[].collection_data.api_interface`)
-- `<NODE_URL_1>`, `<NODE_URL_2>`, `<NODE_URL_3>` — 2–3 public node URLs (https://… or wss://…) — from Phase 2 or chain-metadata-researcher
+- `<NODE_URL_1>` (required), `<NODE_URL_2>`, `<NODE_URL_3>` (optional) — 1–3 public node URLs (https://… or wss://…) — from Phase 2 or chain-metadata-researcher. At least one is required to boot.
 - `<WS_URL>` (optional) — separate WebSocket URL if not already in the URL list
 - `<EXTRA_INTERFACES>` (optional) — additional `(INTERFACE, urls)` blocks for multi-interface chains (Cosmos)
 
-If 2–3 node URLs are NOT available, SKIP this phase entirely (record the reason) and proceed to Phase 9 — the orchestrator must not invent URLs. Note in the Phase 12 checklist that Phase 8 was skipped.
+**Boot is mandatory whenever at least one node URL is available.** Boot and probe with however many URLs you have (1, 2, or 3) — the boot itself catches spec-level defects (e.g. a result_parsing bug that blocks provider startup) that the static gates cannot see, so a single URL is worth booting. The orchestrator must not invent URLs.
+
+If ZERO node URLs are available, do NOT silently skip: **STOP and ask the user to supply at least one node URL** before proceeding. Only skip Phase 8 with explicit user consent; if the user consents to skipping, note it in the Phase 12 checklist.
 
 **Read the subagent prompt fully** before dispatch:
 - `.claude/skills/create-spec/references/agents/local-provider-tester.md` (observe `END-OF-LOCAL-PROVIDER-TESTER-SENTINEL`)
@@ -499,7 +517,7 @@ If exit non-zero: outcome = `BROKEN_AFTER_FIX`. Present the snapshot path (`/tmp
 
 Same delegation pattern as Phase 8 — a single `general-purpose` subagent re-boots the local provider against the FIXED spec on disk and re-probes a deterministic minimal set to detect regressions. The orchestrator does NOT execute the boot script or compare classifications inline.
 
-Skip this phase entirely if Phase 8 was skipped (no node URLs available).
+Skip this phase entirely only if Phase 8 was skipped (i.e. the user explicitly consented to skipping when zero node URLs were available).
 
 **Read the subagent prompt fully** before dispatch:
 - `.claude/skills/create-spec/references/agents/local-provider-smoke-tester.md` (observe `END-OF-LOCAL-PROVIDER-SMOKE-TESTER-SENTINEL`)

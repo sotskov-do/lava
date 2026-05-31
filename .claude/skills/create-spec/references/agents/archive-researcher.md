@@ -190,15 +190,16 @@ Combine Layers 1 + 2 into concrete spec values:
 - **has_archive (testnet)** — same logic applied to testnet probe / docs. Common case: testnet is pruned even when mainnet is archive.
   - `chain-discretion` (with explicit "skipped" note) if the probe was skipped for `chain_family=other` or because `<testnet_rpc_url>` was empty AND docs are not definitive — and set `status: NEEDS_HUMAN_DECISION`
 
-- **rule.block** — integer. Use this table:
+- **rule.block** and **pruning.latest_distance** — integers, both derived from the documented retention window expressed in BLOCKS. There is no lookup table — compute the window directly:
 
-  | documented_retention | rule.block |
-  |---|---|
-  | ≤ 256 blocks (e.g., geth `--prune` default) | 1000 |
-  | 257 – 10,000 blocks | 10 × retention (round to nearest 1000) |
-  | > 10,000 blocks, "all history", or archive default | 100000 |
-  | retention in time (e.g., "7 days") | convert using `average_block_time` from chain-metadata-researcher; if unavailable, default 1000 and flag in reason |
-  | unknown / undocumented | 1000 (flag in reason) |
+  1. Normalize `documented_retention` to a block count `retention_blocks`:
+     - retention already in blocks (e.g. "1024 blocks") → use it directly.
+     - retention in time (e.g. "~2 h", "7 days") → `retention_blocks = retention_seconds ÷ average_block_time` (use `average_block_time` from chain-metadata-researcher).
+     - retention unknown / undocumented → set `retention_blocks = unknown`.
+  2. Set both `rule.block = retention_blocks` and `pruning.latest_distance = retention_blocks`.
+  3. When `retention_blocks = unknown`, fall back to the conservative default `1000` for both fields AND flag it explicitly in the reason ("retention undocumented — conservative default 1000").
+
+  Worked example: a chain with ~2 h retention and 8 s blocks → `retention_blocks ≈ 7200 ÷ 8 = 900`, so `rule.block = 900`. (The old table would have emitted 100000 here — ~111× too large.)
 
 - **pruning verification expected_value** — Always emit `*` for chains today. No chain currently exposes a stable queryable pruning marker in its status/health RPC. If you believe you have found one, do NOT emit a concrete value — instead set `status: NEEDS_HUMAN_DECISION` and document your finding in the Conflicts section so the orchestrator + user can decide.
 
@@ -237,7 +238,9 @@ Return EXACTLY this structure, with `<placeholders>` filled in. No leading or tr
 ## Recommendation
 - has_archive (mainnet): yes|no|chain-discretion — <reason>
 - has_archive (testnet): yes|no|chain-discretion — <reason>
-- rule.block: <int> — <reason>
+- retention_blocks: <int or "unknown"> — <how derived: blocks direct | seconds÷block_time | unknown>
+- rule.block: <int> — = retention_blocks (or conservative 1000 if unknown)
+- pruning.latest_distance: <int> — = retention_blocks (or conservative 1000 if unknown)
 - pruning expected_value: <value or "*"> — <reason>
 
 ## Conflicts
