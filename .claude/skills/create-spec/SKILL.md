@@ -120,7 +120,7 @@ Then before writing any JSON, emit a **calculations table** to the user showing 
 |---|---|---|---|
 | `average_block_time` | (docs / empirical measurement — cite which) | — | (ms) |
 | `block_distance_for_finalized_data` | (consensus type — PoW=6–12, BFT=1–3, instant=1) | — | (int) |
-| `blocks_in_finalization_proof` | derived | `max(ceil(1000 / average_block_time), 3)` | (int) |
+| `blocks_in_finalization_proof` | finality-typed | `3` if probabilistic finality (PoW / slow PoS, e.g. Ethereum, Arbitrum); `1` if fast/instant finality (BFT, Tendermint/Cosmos, Solana, BTC-style longest-chain-with-checkpoints, L2s that inherit instant settlement). **Fallback when finality model can't be confidently classified:** `max(ceil(1000 / average_block_time), 3)` (floors at 3 → conservative; never falls back to 1) | (int) |
 | `allowed_block_lag_for_qos_sync` | derived | `max(ceil(10000 / average_block_time), 1)` | (int) |
 | `reliability_threshold` | standard | `268435455` | `268435455` |
 | `data_reliability_enabled` | standard | `true` | `true` |
@@ -331,7 +331,7 @@ Wait for all 9 subagents to return. Parse each one's last `RESULT: PASS | FAIL` 
 - `enabled` — its WATCH-LIST rows. These do NOT feed the fixer (never auto-disable — free-tier caveat). Print them to the user and carry them into Phase 8 as a probe watch-list.
 - `pruning` — when it prints `INFO: retention unknown`, treat as PASS (no fix); print the INFO to the user.
 
-A gate's `RESULT: FAIL` (cu-semantic Layer-1 anomaly, pruning >3× off, or any existing hard gate) routes to the fixer as a must-fix. The `enabled` gate's `RESULT` is always PASS.
+A gate's `RESULT: FAIL` (cu-semantic Layer-0 subscription-CU violation or Layer-1 anomaly, pruning >3× off, or any existing hard gate) routes to the fixer as a must-fix. The `enabled` gate's `RESULT` is always PASS.
 
 **If all 9 RESULTS are PASS**: print a single-line summary to the user (`Phase 6: all 9 gates PASS`) and proceed to Phase 7 (still printing any advisory cu-semantic / enabled-watch-list rows).
 
