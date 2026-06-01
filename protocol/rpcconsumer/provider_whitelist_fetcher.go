@@ -19,23 +19,30 @@ const providerWhitelistRetryInterval = 30 * time.Second
 // ProviderWhitelistFetcher periodically loads the consumer provider whitelist from its source and
 // applies it to the shared *lavasession.ProviderWhitelist. The source is either:
 //   - a GitHub/GitLab directory URL, fetched with the exact same machinery as specs
-//     (specfetcher), authenticated with the existing github/gitlab tokens; or
+//     (specfetcher); or
 //   - a local JSON file path.
+//
+// For remote sources it authenticates with the dedicated --providers-whitelist-token when set,
+// otherwise it falls back to the shared --github-token / --gitlab-token (picked by provider),
+// matching how specs are authenticated. This lets the whitelist live in a different repo with a
+// different credential than the specs.
 //
 // A single fetcher serves all chains (the whitelist is global; each per-chain session manager
 // queries it with its own ChainID). It is only constructed/started when a source is configured,
 // so when the flag is empty no refresh loop runs at all.
 type ProviderWhitelistFetcher struct {
 	source          string
+	whitelistToken  string // dedicated token for the whitelist source; falls back to github/gitlab token when empty
 	githubToken     string
 	gitlabToken     string
 	refreshInterval time.Duration
 	target          *lavasession.ProviderWhitelist
 }
 
-func NewProviderWhitelistFetcher(source, githubToken, gitlabToken string, refreshInterval time.Duration, target *lavasession.ProviderWhitelist) *ProviderWhitelistFetcher {
+func NewProviderWhitelistFetcher(source, whitelistToken, githubToken, gitlabToken string, refreshInterval time.Duration, target *lavasession.ProviderWhitelist) *ProviderWhitelistFetcher {
 	return &ProviderWhitelistFetcher{
 		source:          source,
+		whitelistToken:  whitelistToken,
 		githubToken:     githubToken,
 		gitlabToken:     gitlabToken,
 		refreshInterval: refreshInterval,
@@ -105,15 +112,7 @@ func (f *ProviderWhitelistFetcher) loadOnce(ctx context.Context) bool {
 }
 
 func (f *ProviderWhitelistFetcher) loadFromRemote(ctx context.Context) bool {
-	// Pick the token by provider, mirroring how specs are loaded (statetracker.loadAllSpecsFromRemoteRepo).
-	token := ""
-	if specfetcher.IsGitHubURL(f.source) {
-		token = f.githubToken
-	} else if specfetcher.IsGitLabURL(f.source) {
-		token = f.gitlabToken
-	}
-
-	files, err := specfetcher.FetchAllFilesFromRemote(ctx, f.source, token)
+	files, err := specfetcher.FetchAllFilesFromRemote(ctx, f.source, f.resolveTokenForSource())
 	if err != nil {
 		utils.LavaFormatError("failed fetching provider whitelist from remote, keeping previous list", err, utils.LogAttr("source", f.source))
 		return false
@@ -123,6 +122,23 @@ func (f *ProviderWhitelistFetcher) loadFromRemote(ctx context.Context) bool {
 		return false
 	}
 	return true
+}
+
+// resolveTokenForSource returns the auth token to use for the whitelist remote fetch. The
+// dedicated --providers-whitelist-token wins when set; otherwise it falls back to the shared
+// --github-token / --gitlab-token, picked by the source's provider (mirroring how specs are
+// authenticated in statetracker.loadAllSpecsFromRemoteRepo).
+func (f *ProviderWhitelistFetcher) resolveTokenForSource() string {
+	if f.whitelistToken != "" {
+		return f.whitelistToken
+	}
+	if specfetcher.IsGitHubURL(f.source) {
+		return f.githubToken
+	}
+	if specfetcher.IsGitLabURL(f.source) {
+		return f.gitlabToken
+	}
+	return ""
 }
 
 func (f *ProviderWhitelistFetcher) loadFromFile() bool {

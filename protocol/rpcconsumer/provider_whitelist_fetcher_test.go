@@ -21,7 +21,7 @@ func writeTempWhitelist(t *testing.T, content string) string {
 func TestProviderWhitelistFetcher_LoadFromLocalFile(t *testing.T) {
 	path := writeTempWhitelist(t, `{"providers":[{"address":"provider0","chains":["ETH1","LAV1"]}]}`)
 	pw := lavasession.NewProviderWhitelist()
-	fetcher := NewProviderWhitelistFetcher(path, "", "", time.Hour, pw)
+	fetcher := NewProviderWhitelistFetcher(path, "", "", "", time.Hour, pw)
 
 	require.True(t, fetcher.loadOnce(context.Background()))
 	require.True(t, pw.Enabled())
@@ -33,7 +33,7 @@ func TestProviderWhitelistFetcher_LoadFromLocalFile(t *testing.T) {
 func TestProviderWhitelistFetcher_MalformedRefreshKeepsPrevious(t *testing.T) {
 	path := writeTempWhitelist(t, `{"providers":[{"address":"provider0","chains":["ETH1"]}]}`)
 	pw := lavasession.NewProviderWhitelist()
-	fetcher := NewProviderWhitelistFetcher(path, "", "", time.Hour, pw)
+	fetcher := NewProviderWhitelistFetcher(path, "", "", "", time.Hour, pw)
 
 	require.True(t, fetcher.loadOnce(context.Background()))
 	require.True(t, pw.IsAllowed("ETH1", "provider0"))
@@ -46,10 +46,29 @@ func TestProviderWhitelistFetcher_MalformedRefreshKeepsPrevious(t *testing.T) {
 
 func TestProviderWhitelistFetcher_MissingFileKeepsPassthrough(t *testing.T) {
 	pw := lavasession.NewProviderWhitelist()
-	fetcher := NewProviderWhitelistFetcher(filepath.Join(t.TempDir(), "does-not-exist.json"), "", "", time.Hour, pw)
+	fetcher := NewProviderWhitelistFetcher(filepath.Join(t.TempDir(), "does-not-exist.json"), "", "", "", time.Hour, pw)
 
 	require.False(t, fetcher.loadOnce(context.Background()))
 	// Never loaded -> stays in passthrough.
 	require.False(t, pw.Enabled())
 	require.True(t, pw.IsAllowed("ETH1", "provider0"))
+}
+
+func TestProviderWhitelistFetcher_ResolveTokenForSource(t *testing.T) {
+	const (
+		ghURL = "https://github.com/owner/repo/tree/main/dir"
+		glURL = "https://gitlab.com/owner/repo/-/tree/main/dir"
+		local = "/tmp/whitelist.json"
+	)
+
+	// A dedicated whitelist token wins regardless of the source's provider.
+	require.Equal(t, "dedicated", NewProviderWhitelistFetcher(ghURL, "dedicated", "gh", "gl", time.Hour, nil).resolveTokenForSource())
+	require.Equal(t, "dedicated", NewProviderWhitelistFetcher(glURL, "dedicated", "gh", "gl", time.Hour, nil).resolveTokenForSource())
+
+	// With no dedicated token, fall back to the provider-specific token.
+	require.Equal(t, "gh", NewProviderWhitelistFetcher(ghURL, "", "gh", "gl", time.Hour, nil).resolveTokenForSource())
+	require.Equal(t, "gl", NewProviderWhitelistFetcher(glURL, "", "gh", "gl", time.Hour, nil).resolveTokenForSource())
+
+	// A local file source needs no token.
+	require.Equal(t, "", NewProviderWhitelistFetcher(local, "", "gh", "gl", time.Hour, nil).resolveTokenForSource())
 }
