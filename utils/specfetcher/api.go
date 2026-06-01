@@ -52,6 +52,19 @@ func FetchAllSpecsFromRemote(ctx context.Context, repoURL, token string) (map[st
 	return fetcher.FetchAllSpecs(ctx, repoURL)
 }
 
+// FetchAllFilesFromRemote fetches all .json files from a remote repository directory and
+// returns their raw contents keyed by source URL, without interpreting them. It uses the
+// exact same GitHub/GitLab machinery as spec fetching (URL parsing, directory listing,
+// authenticated raw download); callers parse the bytes with their own schema.
+//
+// URL format is identical to specs, e.g. https://github.com/{owner}/{repo}/tree/{branch}/{path}
+func FetchAllFilesFromRemote(ctx context.Context, repoURL, token string) (map[string][]byte, error) {
+	config := DefaultConfig()
+	config.Token = token
+	fetcher := New(config)
+	return fetcher.FetchAllRawFiles(ctx, repoURL)
+}
+
 // IsGitHubURL returns true if the URL is a GitHub repository URL.
 func IsGitHubURL(rawURL string) bool {
 	info, err := ParseRepoURL(rawURL)

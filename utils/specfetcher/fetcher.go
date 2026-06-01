@@ -105,6 +105,21 @@ func (f *Fetcher) FetchSpec(ctx context.Context, repoURL, chainID string) (types
 
 // FetchAllSpecs fetches all specs from a remote repository.
 func (f *Fetcher) FetchAllSpecs(ctx context.Context, repoURL string) (map[string]types.Spec, error) {
+	rawFiles, err := f.FetchAllRawFiles(ctx, repoURL)
+	if err != nil {
+		return nil, err
+	}
+	return parseSpecsFromRawFiles(rawFiles)
+}
+
+// FetchAllRawFiles fetches all .json files from a remote repository directory and returns
+// their raw contents keyed by source URL, without interpreting them.
+//
+// This is the shared fetch path: specs build on it (parsing each file into types.Spec via
+// parseSpecsFromRawFiles), and other JSON configs with their own unrelated schema — such as
+// the consumer provider whitelist — reuse the exact same GitHub/GitLab machinery here and
+// parse the returned bytes themselves.
+func (f *Fetcher) FetchAllRawFiles(ctx context.Context, repoURL string) (map[string][]byte, error) {
 	info, err := ParseRepoURL(repoURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse repository URL: %w", err)
@@ -112,9 +127,9 @@ func (f *Fetcher) FetchAllSpecs(ctx context.Context, repoURL string) (map[string
 
 	switch info.Provider {
 	case ProviderGitHub:
-		return f.fetchFromGitHub(ctx, info)
+		return f.fetchRawFromGitHub(ctx, info)
 	case ProviderGitLab:
-		return f.fetchFromGitLab(ctx, info)
+		return f.fetchRawFromGitLab(ctx, info)
 	default:
 		return nil, fmt.Errorf("unsupported provider: %s", info.Provider)
 	}
@@ -215,10 +230,11 @@ func containsGitLabSeparator(parts []string) bool {
 	return false
 }
 
-// fetchResult holds the result of fetching a single spec file.
+// fetchResult holds the result of fetching a single file.
 type fetchResult struct {
-	specs  map[string]types.Spec
-	errors []string
+	url     string
+	content []byte
+	errors  []string
 }
 
 // doRequest performs an HTTP request with the configured client and timeout.
@@ -235,8 +251,12 @@ func (f *Fetcher) doRequest(ctx context.Context, method, url string, setHeaders 
 	return f.config.HTTPClient.Do(req)
 }
 
-// fetchFilesParallel fetches multiple files in parallel and parses them as specs.
-func (f *Fetcher) fetchFilesParallel(ctx context.Context, fileURLs []string, setHeaders func(*http.Request)) (map[string]types.Spec, error) {
+// fetchRawFilesParallel fetches multiple files in parallel and returns their raw contents
+// keyed by source URL. It does not interpret the contents (no spec/whitelist parsing).
+//
+// Mirrors the previous spec fetch semantics: it fails only when zero files were fetched, and
+// logs a warning (rather than failing) when some files fail while others succeed.
+func (f *Fetcher) fetchRawFilesParallel(ctx context.Context, fileURLs []string, setHeaders func(*http.Request)) (map[string][]byte, error) {
 	resultChan := make(chan fetchResult, len(fileURLs))
 	semaphore := make(chan struct{}, f.config.MaxConcurrency)
 
@@ -245,7 +265,7 @@ func (f *Fetcher) fetchFilesParallel(ctx context.Context, fileURLs []string, set
 			semaphore <- struct{}{}        // acquire
 			defer func() { <-semaphore }() // release
 
-			result := fetchResult{specs: make(map[string]types.Spec)}
+			result := fetchResult{url: url}
 
 			fetchCtx, cancel := context.WithTimeout(ctx, f.config.FileFetchTimeout)
 			defer cancel()
@@ -271,44 +291,70 @@ func (f *Fetcher) fetchFilesParallel(ctx context.Context, fileURLs []string, set
 				return
 			}
 
-			var proposal specutils.SpecAddProposalJSON
-			if err := json.Unmarshal(content, &proposal); err != nil {
-				result.errors = append(result.errors, fmt.Sprintf("%s: failed to parse JSON: %v", url, err))
-				resultChan <- result
-				return
-			}
-
-			for _, spec := range proposal.Proposal.Specs {
-				result.specs[spec.Index] = spec
-			}
+			result.content = content
 			resultChan <- result
 		}(fileURL)
 	}
 
 	// Collect results
-	specs := make(map[string]types.Spec)
+	files := make(map[string][]byte)
 	var fetchErrors []string
 
 	for i := 0; i < len(fileURLs); i++ {
 		result := <-resultChan
-		for k, v := range result.specs {
-			specs[k] = v
+		if result.content != nil {
+			files[result.url] = result.content
 		}
 		fetchErrors = append(fetchErrors, result.errors...)
 	}
 
-	if len(specs) == 0 {
+	if len(files) == 0 {
 		if len(fetchErrors) > 0 {
-			return nil, fmt.Errorf("failed to fetch specs: %s", strings.Join(fetchErrors, "; "))
+			return nil, fmt.Errorf("failed to fetch files: %s", strings.Join(fetchErrors, "; "))
+		}
+		return nil, fmt.Errorf("no files found")
+	}
+
+	// Log any fetch errors (partial failures are tolerated)
+	if len(fetchErrors) > 0 {
+		utils.LavaFormatWarning("Some files failed to fetch", nil,
+			utils.LogAttr("error_count", len(fetchErrors)),
+			utils.LogAttr("errors", strings.Join(fetchErrors, "; ")))
+	}
+
+	return files, nil
+}
+
+// parseSpecsFromRawFiles interprets raw file contents (from fetchRawFilesParallel) as spec
+// add-proposals and returns the contained specs keyed by chain ID (Index). It fails only when
+// no spec could be parsed from any file, mirroring the previous fetch-and-parse behavior.
+func parseSpecsFromRawFiles(rawFiles map[string][]byte) (map[string]types.Spec, error) {
+	specs := make(map[string]types.Spec)
+	var parseErrors []string
+
+	for fileURL, content := range rawFiles {
+		var proposal specutils.SpecAddProposalJSON
+		if err := json.Unmarshal(content, &proposal); err != nil {
+			parseErrors = append(parseErrors, fmt.Sprintf("%s: failed to parse JSON: %v", fileURL, err))
+			continue
+		}
+		for _, spec := range proposal.Proposal.Specs {
+			specs[spec.Index] = spec
+		}
+	}
+
+	if len(specs) == 0 {
+		if len(parseErrors) > 0 {
+			return nil, fmt.Errorf("failed to parse specs: %s", strings.Join(parseErrors, "; "))
 		}
 		return nil, fmt.Errorf("no specs found")
 	}
 
-	// Log any fetch errors
-	if len(fetchErrors) > 0 {
-		utils.LavaFormatWarning("Some spec files failed to fetch", nil,
-			utils.LogAttr("error_count", len(fetchErrors)),
-			utils.LogAttr("errors", strings.Join(fetchErrors, "; ")))
+	// Log any parse errors (partial failures are tolerated)
+	if len(parseErrors) > 0 {
+		utils.LavaFormatWarning("Some spec files failed to parse", nil,
+			utils.LogAttr("error_count", len(parseErrors)),
+			utils.LogAttr("errors", strings.Join(parseErrors, "; ")))
 	}
 
 	// Log loaded specs

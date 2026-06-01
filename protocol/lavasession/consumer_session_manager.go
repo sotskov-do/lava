@@ -88,6 +88,11 @@ type ConsumerSessionManager struct {
 	// getLavaBlockHeight returns the current Lava blockchain block height
 	// This is NOT used for RelaySession.Epoch (which must be the pairing epoch start block)
 	getLavaBlockHeight func() int64
+
+	// providerWhitelist, when set and loaded, restricts relays to whitelisted (provider, chain)
+	// pairs. nil (not configured) or not-yet-loaded means passthrough (current behavior).
+	// Shared across all per-chain managers; this manager queries it with its own ChainID.
+	providerWhitelist *ProviderWhitelist
 }
 
 func (csm *ConsumerSessionManager) GetQoSManager() *qos.QoSManager {
@@ -98,6 +103,43 @@ func (csm *ConsumerSessionManager) GetNumberOfValidProviders() int {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
 	return len(csm.validAddresses)
+}
+
+// SetProviderWhitelist injects the shared provider whitelist into this per-chain manager. It is
+// safe to pass nil (no whitelist configured), which leaves the manager in passthrough behavior.
+func (csm *ConsumerSessionManager) SetProviderWhitelist(whitelist *ProviderWhitelist) {
+	csm.providerWhitelist = whitelist
+}
+
+// isProviderAllowed reports whether this manager may relay to providerAddr, per the provider
+// whitelist for this manager's chain. Returns true (allowed) when no whitelist is configured or
+// it has not loaded yet. Used to guard single-provider selection paths (backup, blocked-recovery).
+func (csm *ConsumerSessionManager) isProviderAllowed(providerAddr string) bool {
+	if csm.providerWhitelist == nil {
+		return true
+	}
+	return csm.providerWhitelist.IsAllowed(csm.rpcEndpoint.ChainID, providerAddr)
+}
+
+// filterAllowedProviders returns the subset of addresses permitted by the provider whitelist for
+// this manager's chain. When no whitelist is configured or loaded it returns the input unchanged.
+// The whitelist snapshot is loaded once and reused across all addresses (lock-free hot path).
+func (csm *ConsumerSessionManager) filterAllowedProviders(addresses []string) []string {
+	if csm.providerWhitelist == nil {
+		return addresses
+	}
+	data := csm.providerWhitelist.snapshot()
+	if data == nil {
+		return addresses // not loaded yet -> passthrough
+	}
+	chainID := csm.rpcEndpoint.ChainID
+	filtered := make([]string, 0, len(addresses))
+	for _, addr := range addresses {
+		if data.isAllowed(chainID, addr) {
+			filtered = append(filtered, addr)
+		}
+	}
+	return filtered
 }
 
 // IsStaticProvider returns true when the given provider address belongs to a
@@ -1084,6 +1126,11 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 	// cs.Lock must be Rlocked here.
 	ignoredProvidersListLength := len(ignoredProvidersList)
 	validAddresses := csm.getValidAddresses(addon, extensions, ctx)
+	// Restrict candidates to whitelisted providers for this chain (no-op when no whitelist is
+	// configured/loaded). This single filter also covers the header-selected and sticky-session
+	// shortcuts below, since both gate on membership in validAddresses, and the optimizer paths
+	// which all select from validAddresses.
+	validAddresses = csm.filterAllowedProviders(validAddresses)
 	validAddressesLength := len(validAddresses)
 	totalValidLength := validAddressesLength - ignoredProvidersListLength
 
@@ -1282,6 +1329,12 @@ func (csm *ConsumerSessionManager) tryGetConsumerSessionWithProviderFromBlockedP
 	// csm.currentlyBlockedProviderAddresses is sorted by the provider with the highest cu used this epoch to the lowest
 	// meaning if we fetch the first successful index this is probably the highest success ratio to get a response.
 	for _, providerAddress := range csm.currentlyBlockedProviderAddresses {
+		// Skip providers not permitted by the provider whitelist for this chain. The whitelist can
+		// change (hourly refresh) after a provider was blocked, so a now-delisted provider must not
+		// be recovered into service through this fallback.
+		if !csm.isProviderAllowed(providerAddress) {
+			continue
+		}
 		// check if we have this provider already.
 		if _, providerExistInIgnoredProviders := ignoredProviders.providers[providerAddress]; providerExistInIgnoredProviders {
 			utils.LavaFormatTrace("[continue] provider already in ignored providers", utils.LogAttr("providerAddress", providerAddress), utils.LogAttr("GUID", ctx))
@@ -1347,6 +1400,11 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 	// Get valid backup provider addresses that support the required addon and extensions
 	backupProviderAddresses := []string{}
 	for providerAddress, consumerSessionsWithProvider := range csm.backupProviders {
+		// Skip providers not permitted by the provider whitelist for this chain.
+		if !csm.isProviderAllowed(providerAddress) {
+			continue
+		}
+
 		// Skip if provider is in ignored list (already tried or failed this request)
 		if _, exists := ignoredProviders.providers[providerAddress]; exists {
 			continue
