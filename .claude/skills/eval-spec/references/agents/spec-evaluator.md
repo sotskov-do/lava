@@ -7,6 +7,9 @@ You compare a generated Lava SmartRouter spec against the upstream ground truth 
 - `generated_spec_path`: Path to generated spec JSON
 - `upstream_spec_path`: Path to upstream ground truth JSON
 - `chain_name`: Chain being evaluated
+- `deep_probe` *(optional, default `false`)*: When `true`, run the **DEEP TIER** (Step 2.5 live probe) — you discover free public RPC nodes yourself. When `false`/absent → fast tier (no live calls; score against upstream only).
+- `api_interface` *(optional, default `jsonrpc`)*: Primary interface, so the probe picks the right request shape.
+- `rpc_url_hints` *(optional)*: Any RPC URLs the orchestrator happens to know. NOT required — if empty you find your own (Step 2.5.0). If present, validate them like any discovered URL before trusting them.
 
 ## CRITICAL: Gate vs Content
 
@@ -77,6 +80,69 @@ jq '[.proposal.specs[0].api_collections[]? | select(.collection_data.add_on != "
 jq '[.proposal.specs[0].api_collections[]?.extensions[]? | {name, cu_multiplier, rule}]' SPEC.json
 ```
 
+## Step 2.5: Live RPC Probe (DEEP TIER — only when `deep_probe` is `true`)
+
+**If `deep_probe` is not `true`, SKIP this entire step** and score every category against upstream exactly as written in Step 3 (fast tier). When enabled, discover RPCs (2.5.0), run the probes, and apply the **Deep-tier adjustment** noted inside each affected category. The chain itself — not the upstream spec — is ground truth here, because the upstream spec may be stale. "Step 2.5 ran" means probes actually executed (discovery found ≥1 working node).
+
+**Principle: probe the DISAGREEMENTS, not the intersection.** Methods that appear in both generated and upstream are already agreed — probing them spends budget on a non-decision. Spend probes only on the set-difference (extras + misses) plus the two cheap objective checks (chain-id, block-time).
+
+All probes are independent HTTP calls — run them concurrently. EVM/`jsonrpc` recipes below; for non-EVM use the family's equivalent method (see `references/chain-families.md`).
+
+### 2.5.0 — Discover free public RPC URLs yourself
+
+The orchestrator does NOT supply URLs. Find **2–3 free public mainnet RPCs** (and 1 testnet, for the testnet chain-id) for `<chain_name>`:
+
+1. **Official chain docs / GitHub** — the "public endpoints" / "RPC" / "network" page.
+2. **https://chainlist.org/** (EVM) — filter to free, no-API-key endpoints.
+3. **https://www.comparenodes.com/** — public node aggregator.
+
+(Use `rpc_url_hints` first if provided, but still validate them.)
+
+**Validate liveness before using any URL:** hit each candidate with the chain-id call (`eth_chainId` or the family equivalent) and keep only those returning valid JSON. **Discard** URLs that require an API key, rate-limit immediately, or return a *different* chain-id than the others. Prefer **≥2 mainnet URLs that AGREE on chain-id** — this confirms they serve this chain and gives the 2-node confirmation the soft-fail rule needs.
+
+Degradation:
+- **0 working mainnet URLs found** → SKIP the probe, set `tier="fast"`, add a `failures` note `"deep probe requested but no working public RPC found"`, and score against upstream.
+- **Exactly 1 working URL** → probe with it, but the 2-node `-32601` confirmation is impossible, so ALL `-32601` results stay **"unknown"** (never escalate to confirmed-not-served).
+
+### A. Method set-difference
+
+```bash
+G=$(jq '[.proposal.specs[].api_collections[].apis[]?.name] | unique' GENERATED.json)
+U=$(jq '[.proposal.specs[].api_collections[].apis[]?.name] | unique' UPSTREAM.json)
+jq -n --argjson g "$G" --argjson u "$U" '{extra: ($g - $u), missed: ($u - $g)}'
+# extra  = generated-only (probe to confirm real vs hallucinated)
+# missed = upstream-only  (probe to confirm genuine-miss vs upstream-stale)
+```
+
+### B. Probe recipe + classification
+
+```bash
+probe() {  # $1=url  $2=method   (empty params is fine — we only care about the error CODE)
+  curl -s -m 8 -X POST -H 'Content-Type: application/json' \
+    --data "{\"jsonrpc\":\"2.0\",\"method\":\"$2\",\"params\":[],\"id\":1}" "$1"
+}
+```
+
+Classify each probed method by the JSON-RPC error **code**, not the HTTP status:
+
+| Response | Verdict |
+|---|---|
+| `result` present, OR any error **except** `-32601` (e.g. `-32602` invalid params) | **SERVED** — the node recognizes the method |
+| error code `-32601` (method not found) | **NOT-SERVED (soft)** — see soft-fail rule |
+
+**Soft-fail rule (critical):** a single node's `-32601` is NOT proof a method is fake — free-tier / provider-specific nodes reject methods they don't serve. So:
+- Treat `-32601` as **"unknown,"** not "hallucinated." Only mark a method confirmed-not-served when **2 independent nodes** both return `-32601` (probe a second URL if available).
+- A probe that times out / returns non-JSON is **"unknown"** too — never a penalty.
+
+### C. Objective checks (always, when probing)
+
+Use a validated mainnet URL from 2.5.0 (and a testnet one for the testnet chain-id):
+
+- **chain-id:** `probe <mainnet_url> eth_chainId` → `.result`; same on the testnet URL. This LIVE value is ground truth for the Verifications category. (You already fetched these during 2.5.0 validation — reuse them.)
+- **block-time:** fetch the timestamps of the latest block and a block ~20 back (`eth_getBlockByNumber`), compute `(ts_latest − ts_older)/20 × 1000` ms (median over a couple of samples if noisy). This MEASURED value is ground truth for `average_block_time`.
+
+Carry the probe outcomes into Step 3.
+
 ## Step 3: Score Each Category (each is 0-100)
 
 **IMPORTANT: Each category score is a number from 0 to 100. It is NOT the weight.**
@@ -116,6 +182,10 @@ If both G and U are empty (import-based) → score = 100.
 
 Report extra methods as: `extra (newer than upstream): ...` or `extra (unverified): ...`
 
+**Deep-tier adjustment (only if Step 2.5 ran):** replace doc-judgement with probe verdicts on the set-difference.
+- An **extra** method probed **SERVED** → `verified_extra` (not penalized). Probed **confirmed-not-served** (2 nodes `-32601`) → unverified false positive (penalize precision). **Unknown** → benefit of the doubt, count as `verified_extra`.
+- A **missed** method probed **NOT-SERVED** on the live node → **upstream is stale**; remove it from `|U|` (the recall denominator) so omitting it does NOT hurt recall. Probed **SERVED** → genuine miss, keep penalizing recall. **Unknown** → keep in `|U|` (no free pass for the generator).
+
 ### Chain Metadata (weight 20%)
 
 Compare these 4 fields exactly (numeric equality):
@@ -128,6 +198,8 @@ Compare these 4 fields exactly (numeric equality):
 score = (fields_matching / 4) × 100
 ```
 
+**Deep-tier adjustment (only if Step 2.5 ran):** for `average_block_time`, score the generated value against the **measured** block-time (Step 2.5C) within ±25% tolerance, not against upstream — a generated value that matches reality but differs from a stale upstream counts as a MATCH. (The other three fields stay scored vs upstream; the probe doesn't measure them.)
+
 ### Verifications (weight 15%)
 
 Compare the set of unique chain-id `expected_value` strings.
@@ -135,6 +207,8 @@ Compare the set of unique chain-id `expected_value` strings.
 score = (matching_values / upstream_values) × 100
 ```
 If both empty → score = 100.
+
+**Deep-tier adjustment (only if Step 2.5 ran):** score the generated chain-id values against the **live `eth_chainId`** results (Step 2.5C) — mainnet and testnet — instead of against upstream. The live value is objective ground truth; a generated chain-id that matches the live node but differs from a stale upstream counts as a MATCH (and upstream is the one that's wrong).
 
 ### Plugins/Extensions (weight 15%)
 
@@ -146,6 +220,8 @@ F1 of addon detection × 100
 ```
 For archive extensions: also check `cu_multiplier` and `rule.block` match.
 If both have no add-ons and no extensions → score = 100.
+
+**Deep-tier adjustment (only if Step 2.5 ran, and ONLY when archive `rule.block` diverges from upstream):** the archive `rule.block` is a retention window the upstream spec frequently gets stale (e.g. an ETH1-inherited `127` on a chain whose nodes actually retain far more). When generated ≠ upstream, probe historical state at a deep block (EVM: `eth_getBalance` of a well-known address at a block far older than upstream's `rule.block` but within the generated window). If the regular node SERVES that old state, the chain's real retention exceeds upstream's value → do NOT penalize the larger generated `rule.block`; treat as a MATCH and note upstream as stale. If the old-state query is rejected/unsupported, keep scoring vs upstream. Unknown/timeout → score vs upstream (no free pass).
 
 ## Step 4: Compute Weighted Total
 
@@ -167,6 +243,7 @@ Example: if scores are [80, 90, 75, 100, 60]:
   "chain": "<chain_name>",
   "gate": "pass",
   "gate_failure_reason": null,
+  "tier": "deep",
   "scores": {
     "parse_directives": 80,
     "method_coverage": 90,
@@ -178,8 +255,15 @@ Example: if scores are [80, 90, 75, 100, 60]:
   "failures": [
     {"category": "chain_metadata", "detail": "average_block_time: expected 12000 got 13000"},
     {"category": "plugins_extensions", "detail": "missed add-on: trace"}
+  ],
+  "stale_upstream": [
+    {"category": "verifications", "detail": "upstream chain-id '1' but live eth_chainId='0x1'; generated matched live"},
+    {"category": "method_coverage", "detail": "upstream method 'eth_foo' returns -32601 on 2 nodes; dropped from recall denominator"}
   ]
 }
 ```
+
+- `tier`: `"deep"` if Step 2.5 ran, else `"fast"`.
+- `stale_upstream`: divergences where the probe showed **upstream** is wrong and the generated value was credited. Empty array when none / fast tier. These are NOT generator failures — they are signals that the ground-truth spec itself should be fixed; the tuner must NOT treat them as create-spec defects.
 
 Return ONLY this JSON. No markdown fences, no explanation, no commentary.

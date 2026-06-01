@@ -222,12 +222,23 @@ Read the full contents of:
 - `references/eval-rubric.md`
 - `references/agents/spec-evaluator.md`
 
+**Tier cadence (decide `deep_probe` for this iteration before dispatching):**
+
+The two tiers trade speed for precision (see `spec-evaluator.md` Step 2.5). Run the **fast tier every iteration** (cheap, stable — it drives tuning) and the **deep tier periodically** (evaluator discovers free public RPCs itself and live-probes — audits that the metric isn't merely conforming to a stale upstream spec):
+
+```
+deep_probe = (iteration % 5 == 0) OR (previous batch average > 85)
+```
+
+- The `% 5` cadence is a periodic live audit; the `> 85` clause forces a deep pass **before accepting convergence**. **Never declare convergence on a batch that ran fast-tier only** — if a fast-tier batch crosses the threshold, re-run it with `deep_probe = true` and use the deep scores for the convergence check.
+- Deep-tier iterations are slower (web discovery + concurrent probes) and require stronger reasoning, so they use a larger model (below).
+
 Dispatch **7 evaluator agents simultaneously**:
-- **Model:** haiku
+- **Model:** `sonnet` when `deep_probe` is true (RPC discovery + judgment), else `haiku`
 - **subagent_type:** general-purpose
 - **run_in_background:** true
 
-Prompt template (fill `{chain_name}`, `{iteration}`, `{PUBLIC_REPO}` per agent; inline rubric and instructions):
+Prompt template (fill `{chain_name}`, `{iteration}`, `{PUBLIC_REPO}`, `{deep_probe}` per agent; inline rubric and instructions):
 
 ```
 You are evaluating a generated Lava spec against ground truth.
@@ -235,6 +246,7 @@ You are evaluating a generated Lava spec against ground truth.
 Chain: {chain_name}
 Generated spec: /tmp/eval-spec/{iteration}/{chain_name}.json
 Upstream spec: {PUBLIC_REPO}/{chain_name}.json
+deep_probe: {deep_probe}   # true → run Step 2.5 live probe (discover your own free RPCs); false/absent → fast tier
 
 ## Rubric
 {contents of eval-rubric.md}
@@ -256,11 +268,12 @@ Compute metrics across the 7 score reports:
 - **batch_avg** — mean of `weighted_total` scores; gate failures count as 0
 - **gate_pass_count** — number of specs that passed all hard gates
 - **per_category_avg** — mean per rubric category: `parse_directives`, `method_coverage`, `chain_metadata`, `verifications`, `plugins_extensions`
+- **tier** — `"deep"` if this iteration ran `deep_probe = true` (and at least one evaluator actually probed), else `"fast"`. Record it on the `score_history` entry — the Step 6 convergence check requires the last 3 batches to be `deep`.
 
 Log format (print to user and append to `score_history`):
 
 ```
-Iteration {N}: batch_avg={score} | gate_pass={X}/7 | parse={X} method={X} meta={X} verify={X} plugin={X}
+Iteration {N} [{tier}]: batch_avg={score} | gate_pass={X}/7 | parse={X} method={X} meta={X} verify={X} plugin={X}
   FAIL: {chain} ({reason})
   LOW:  {chain} ({category}: {score} — {detail})
   BEST: {chain} ({score})
@@ -297,7 +310,8 @@ if iteration < 8:
     continue → Step 1
 
 elif (len(score_history) >= 3
-      and all(s.batch_avg > 85 for s in score_history[-3:])):
+      and all(s.batch_avg > 85 for s in score_history[-3:])
+      and all(s.tier == "deep" for s in score_history[-3:])):   # convergence must be confirmed on deep-tier scores, not fast-tier-only
     stop → reason = "success"
 
 elif iteration >= 30:

@@ -35,6 +35,8 @@ You may NOT create new reference files. You may NOT delete or rename existing fi
 
 ### Step 1: Analyze Failure Patterns
 
+> ⚠️ **Ignore `stale_upstream[]` — it is NOT a create-spec failure.** Deep-tier evaluator reports (`tier: "deep"`) may include a `stale_upstream[]` array: cases where a live RPC probe proved the **upstream ground-truth spec** was wrong and the generated value (which matched reality) was credited. These are *upstream bugs*, not generator defects. Do NOT diagnose a root cause from them, and NEVER edit create-spec to reproduce a stale upstream value (e.g. do not "fix" the generator to emit a wrong block time, chain-id, or archive `rule.block` just because the upstream spec has it). Doing so would make create-spec *less* correct. Treat only genuine generator failures (the `failures[]` array) as tuning signal. If a category looks low but its misses are all explained by `stale_upstream[]`, that category is actually doing well — leave it alone.
+
 Examine both current iteration results AND `score_history` to identify patterns:
 
 - **Per-category patterns**: Is one category (`parse_directives`, `method_coverage`, `chain_metadata`, `verifications`, `plugins_extensions`) consistently below others?
