@@ -24,10 +24,9 @@ Inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch) �
 In autoresearch, the eval is **objective** — run the code, measure the output. Our eval requires **LLM judgment** because scoring categories like method coverage need understanding of whether "extra" methods are legitimate official APIs or hallucinations. This means:
 
 - Evaluation costs tokens (haiku/sonnet evaluator agents per spec)
-- Scores have variance between runs (LLM non-determinism)
-- The rubric's jq commands are instructions *for* the evaluator agent, not directly executable scoring scripts
+- Scores have variance between runs (LLM non-determinism), but only on the deep tier — see below
 
-A structural pre-gate (the rubric's gate checks) provides an objective pass/fail layer; content accuracy scoring inherently requires reasoning.
+The category arithmetic itself is **not** left to the LLM: `scripts/compare_spec.sh` deterministically computes all five category scores (set-diff, recall/precision/F1, exact-match, weighted total) from the two spec files, and the evaluator agent runs it as its authoritative baseline (`spec-evaluator.md` Step 2.6). So the **fast tier is fully deterministic**. LLM judgment enters only on the **deep tier**, and only for the two calls the script cannot make from static files: "is an extra method real or hallucinated?" and "is the upstream value stale?" — each backed by a live RPC probe. A structural pre-gate (the rubric's gate checks) provides an objective pass/fail layer on top.
 
 ---
 

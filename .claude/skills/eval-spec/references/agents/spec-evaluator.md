@@ -143,9 +143,26 @@ Use a validated mainnet URL from 2.5.0 (and a testnet one for the testnet chain-
 
 Carry the probe outcomes into Step 3.
 
+## Step 2.6: Run the deterministic scorer (authoritative baseline — ALWAYS)
+
+Do NOT compute the category scores in your head. A script does the set-diff, recall/precision/F1, exact-match, and weighted arithmetic deterministically — running it is what keeps scores reproducible across evaluators. Run it on every evaluation, both tiers:
+
+```bash
+SCORER="$(git rev-parse --show-toplevel)/.claude/skills/eval-spec/scripts/compare_spec.sh"
+bash "$SCORER" GENERATED.json UPSTREAM.json   # INDEX defaults to upstream's mainnet specs[0].index
+```
+
+It prints per-category scores (`parse_directives`, `method_coverage`, `chain_metadata`, `verifications`, `plugins_extensions`), the matched/expected counts behind each, and the weighted `Final` total. **These numbers are your baseline — use them verbatim unless a deep-tier adjustment below overrides a specific category.**
+
+What the script does NOT know (it has no live data):
+- It treats every extra method as verified (no precision penalty for hallucinations).
+- It scores `average_block_time`, chain-id, and archive `rule.block` strictly against upstream — so it cannot credit a generated value that beat a stale upstream.
+
+So the script is the WHOLE story for the **fast tier**. For the **deep tier**, start from the script's numbers and recompute ONLY the categories your Step 2.5 probes touched (per the deep-tier adjustments in Step 3). Leave every other category at the script's value.
+
 ## Step 3: Score Each Category (each is 0-100)
 
-**IMPORTANT: Each category score is a number from 0 to 100. It is NOT the weight.**
+**IMPORTANT: Each category score is a number from 0 to 100. It is NOT the weight.** The formulas below describe what the Step 2.6 scorer computes — read them to understand its output and, on the deep tier, to recompute a probe-affected category by hand. Do NOT re-derive an un-probed category from scratch; trust the script.
 
 ### Parse Directives (weight 25%)
 
