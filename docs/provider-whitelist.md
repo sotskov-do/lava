@@ -105,7 +105,6 @@ provider is filtered out of **every** provider-selection path:
 | Optimizer (normal selection) | `validAddresses` is filtered in `getValidProviderAddresses` before the optimizer reads it |
 | Header-selected provider | same `validAddresses` filter (the header shortcut gates on membership) |
 | Sticky session | same `validAddresses` filter (the sticky shortcut gates on membership) |
-| Emergency backup providers | per-candidate guard in `getValidConsumerSessionsWithProviderFromBackupProviderList` |
 | Blocked-provider recovery | per-candidate guard in `tryGetConsumerSessionWithProviderFromBlockedProviderList` |
 
 The blocked-recovery guard matters specifically because the list refreshes on its own clock: a
@@ -129,5 +128,7 @@ triggering repeated `validAddresses` resets.
 
 ## Scope
 
-The feature is wired into **`rpcconsumer` only**. The `rpcsmartrouter` shares the same selection
-code but is injected no whitelist, so its `ConsumerSessionManager` stays in passthrough behavior.
+The feature is wired into **`rpcconsumer` only**: the whitelist is injected into each per-chain
+`ConsumerSessionManager` at consumer startup (`SetProviderWhitelist`). A `ConsumerSessionManager`
+that is never handed a whitelist keeps its current behavior (the nil-instance passthrough case
+above).

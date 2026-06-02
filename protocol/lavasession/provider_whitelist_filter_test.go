@@ -107,28 +107,6 @@ func TestProviderWhitelist_FilterStickySession(t *testing.T) {
 	require.NotContains(t, addrs, excluded)
 }
 
-// TestProviderWhitelist_FilterBackupProviders asserts the emergency backup fallback never selects
-// a non-whitelisted provider (separate store, line ~1361).
-func TestProviderWhitelist_FilterBackupProviders(t *testing.T) {
-	ctx := context.Background()
-	csm := CreateConsumerSessionManager()
-	// Same addresses serve as both main pairing and backups; we only exercise the backup path.
-	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, createPairingList("", true), createPairingList("", true)))
-	excluded := providerStr + "0"
-	csm.SetProviderWhitelist(whitelistAllowingAllExcept(t, csm.rpcEndpoint.ChainID, excluded))
-
-	ignored := &ignoredProviders{providers: map[string]struct{}{}, currentEpoch: csm.atomicReadCurrentEpoch()}
-	// Drain the backup pool; the excluded provider must never be returned.
-	for i := 0; i < numberOfProviders*2; i++ {
-		m, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, ignored, cuForFirstRequest, servicedBlockNumber, "", nil, common.NO_STATE, 0, NewUsedProviders(nil))
-		if err != nil {
-			break // pool exhausted
-		}
-		_, found := m[excluded]
-		require.False(t, found, "non-whitelisted provider selected from backup pool")
-	}
-}
-
 // TestProviderWhitelist_FilterBlockedRecovery asserts the blocked-provider recovery fallback never
 // returns a non-whitelisted provider, even though it was whitelisted when it got blocked (the
 // whitelist can change via the hourly refresh; line ~1290).

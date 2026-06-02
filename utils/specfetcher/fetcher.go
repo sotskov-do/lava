@@ -55,6 +55,13 @@ type Config struct {
 
 	// HTTPClient allows custom HTTP client (useful for testing)
 	HTTPClient *http.Client
+
+	// FailOnPartial makes a multi-file fetch all-or-nothing: if ANY file fails to fetch, the whole
+	// fetch returns an error and no files are returned. The default (false) is the spec behavior,
+	// which tolerates partial failures (some specs beat none). Callers whose consumers replace a
+	// last-known-good snapshot wholesale — the provider whitelist — set this so a transient
+	// per-file failure can't silently drop a chain's entries from the new snapshot.
+	FailOnPartial bool
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -313,6 +320,13 @@ func (f *Fetcher) fetchRawFilesParallel(ctx context.Context, fileURLs []string, 
 			return nil, fmt.Errorf("failed to fetch files: %s", strings.Join(fetchErrors, "; "))
 		}
 		return nil, fmt.Errorf("no files found")
+	}
+
+	// In all-or-nothing mode any per-file failure fails the whole fetch, so the caller can keep its
+	// previous snapshot instead of swapping in a partial set (see Config.FailOnPartial).
+	if f.config.FailOnPartial && len(fetchErrors) > 0 {
+		return nil, fmt.Errorf("partial fetch failure (%d of %d files failed), refusing partial result: %s",
+			len(fetchErrors), len(fileURLs), strings.Join(fetchErrors, "; "))
 	}
 
 	// Log any fetch errors (partial failures are tolerated)

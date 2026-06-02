@@ -57,10 +57,16 @@ func FetchAllSpecsFromRemote(ctx context.Context, repoURL, token string) (map[st
 // exact same GitHub/GitLab machinery as spec fetching (URL parsing, directory listing,
 // authenticated raw download); callers parse the bytes with their own schema.
 //
+// Unlike spec fetching, this is all-or-nothing (Config.FailOnPartial): if any file fails to
+// fetch, the call returns an error and no files. The sole caller (the consumer provider
+// whitelist) replaces its snapshot wholesale, so a partial result would silently drop the
+// missing files' chains; failing instead lets the caller keep its last-known-good list.
+//
 // URL format is identical to specs, e.g. https://github.com/{owner}/{repo}/tree/{branch}/{path}
 func FetchAllFilesFromRemote(ctx context.Context, repoURL, token string) (map[string][]byte, error) {
 	config := DefaultConfig()
 	config.Token = token
+	config.FailOnPartial = true
 	fetcher := New(config)
 	return fetcher.FetchAllRawFiles(ctx, repoURL)
 }

@@ -100,16 +100,37 @@ func TestProviderWhitelist_UpdateFromFilesUnions(t *testing.T) {
 	require.False(t, pw.IsAllowed("LAV1", "provider0"))
 }
 
-func TestProviderWhitelist_UpdateFromFilesSkipsNonConforming(t *testing.T) {
+func TestProviderWhitelist_UpdateFromFilesSkipsNonWhitelist(t *testing.T) {
 	pw := NewProviderWhitelist()
 	files := map[string][]byte{
 		"whitelist.json": []byte(`{"providers":[{"address":"provider0","chains":["ETH1"]}]}`),
-		"spec.json":      []byte(`{"proposal":{"specs":[{"index":"ETH1"}]}}`), // not a whitelist -> skipped
-		"garbage.json":   []byte(`not json at all`),                           // skipped
+		"spec.json":      []byte(`{"proposal":{"specs":[{"index":"ETH1"}]}}`), // valid JSON, no "providers" -> skipped
 	}
-	// Succeeds because at least one file is a valid whitelist; non-conforming files are ignored.
+	// Succeeds because at least one file is a valid whitelist; files that are valid JSON but aren't
+	// whitelist documents are skipped (mixed-repo support).
 	require.NoError(t, pw.UpdateFromFiles(files))
 	require.True(t, pw.IsAllowed("ETH1", "provider0"))
+}
+
+// TestProviderWhitelist_UpdateFromFilesMalformedKeepsPrevious pins the all-or-nothing contract for
+// a corrupt file: a file that fetched OK but is malformed JSON fails the whole refresh and leaves
+// the last-known-good snapshot intact, instead of swapping in a partial union that silently drops
+// the good file's chains. (A malformed JSON file is distinct from a valid-JSON non-whitelist file,
+// which is still skipped — see TestProviderWhitelist_UpdateFromFilesSkipsNonWhitelist.)
+func TestProviderWhitelist_UpdateFromFilesMalformedKeepsPrevious(t *testing.T) {
+	pw := NewProviderWhitelist()
+	require.NoError(t, pw.UpdateFromBytes([]byte(sampleWhitelistJSON)))
+	require.True(t, pw.IsAllowed("ETH1", "provider0"))
+
+	files := map[string][]byte{
+		"good.json":    []byte(`{"providers":[{"address":"providerX","chains":["NEAR"]}]}`),
+		"corrupt.json": []byte(`not json at all`), // malformed -> hard failure, no swap
+	}
+	require.Error(t, pw.UpdateFromFiles(files))
+	// The previous snapshot is untouched: the good file's NEAR provider was NOT swapped in, and the
+	// original ETH1 provider is still allowed.
+	require.True(t, pw.IsAllowed("ETH1", "provider0"))
+	require.False(t, pw.IsAllowed("NEAR", "providerX"))
 }
 
 func TestProviderWhitelist_UpdateFromFilesAllInvalidKeepsPrevious(t *testing.T) {

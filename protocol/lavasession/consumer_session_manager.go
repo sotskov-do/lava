@@ -113,7 +113,8 @@ func (csm *ConsumerSessionManager) SetProviderWhitelist(whitelist *ProviderWhite
 
 // isProviderAllowed reports whether this manager may relay to providerAddr, per the provider
 // whitelist for this manager's chain. Returns true (allowed) when no whitelist is configured or
-// it has not loaded yet. Used to guard single-provider selection paths (backup, blocked-recovery).
+// it has not loaded yet. Used to guard the blocked-provider recovery path, whose candidates are
+// not re-filtered through the central validAddresses filter.
 func (csm *ConsumerSessionManager) isProviderAllowed(providerAddr string) bool {
 	if csm.providerWhitelist == nil {
 		return true
@@ -130,7 +131,7 @@ func (csm *ConsumerSessionManager) filterAllowedProviders(addresses []string) []
 	}
 	data := csm.providerWhitelist.snapshot()
 	if data == nil {
-		return addresses // not loaded yet -> passthrough
+		return addresses // not loaded yet -> passthrough (allow all until the first successful load)
 	}
 	chainID := csm.rpcEndpoint.ChainID
 	filtered := make([]string, 0, len(addresses))
@@ -1400,11 +1401,6 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 	// Get valid backup provider addresses that support the required addon and extensions
 	backupProviderAddresses := []string{}
 	for providerAddress, consumerSessionsWithProvider := range csm.backupProviders {
-		// Skip providers not permitted by the provider whitelist for this chain.
-		if !csm.isProviderAllowed(providerAddress) {
-			continue
-		}
-
 		// Skip if provider is in ignored list (already tried or failed this request)
 		if _, exists := ignoredProviders.providers[providerAddress]; exists {
 			continue

@@ -114,14 +114,28 @@ func (f *ProviderWhitelistFetcher) loadOnce(ctx context.Context) bool {
 func (f *ProviderWhitelistFetcher) loadFromRemote(ctx context.Context) bool {
 	files, err := specfetcher.FetchAllFilesFromRemote(ctx, f.source, f.resolveTokenForSource())
 	if err != nil {
-		utils.LavaFormatError("failed fetching provider whitelist from remote, keeping previous list", err, utils.LogAttr("source", f.source))
+		f.logLoadFailure("failed fetching provider whitelist from remote", err)
 		return false
 	}
 	if err := f.target.UpdateFromFiles(files); err != nil {
-		utils.LavaFormatError("failed parsing provider whitelist from remote, keeping previous list", err, utils.LogAttr("source", f.source))
+		f.logLoadFailure("failed parsing provider whitelist from remote", err)
 		return false
 	}
 	return true
+}
+
+// logLoadFailure logs a load/refresh failure with wording that reflects what the consumer actually
+// does next, which differs by lifecycle stage:
+//   - before the first successful load (startup) nothing is in place, so the consumer stays in
+//     passthrough and relays to ALL providers until a load succeeds;
+//   - after a list has loaded, the failure is non-destructive: the last-known-good snapshot is kept
+//     and keeps gating relays.
+func (f *ProviderWhitelistFetcher) logLoadFailure(msg string, err error) {
+	if f.target != nil && f.target.Enabled() {
+		utils.LavaFormatError(msg+"; keeping the last-known-good whitelist", err, utils.LogAttr("source", f.source))
+		return
+	}
+	utils.LavaFormatError(msg+"; no whitelist loaded yet, consumer is ALLOWING ALL relays (passthrough) until the first successful load", err, utils.LogAttr("source", f.source))
 }
 
 // resolveTokenForSource returns the auth token to use for the whitelist remote fetch. The
@@ -144,11 +158,11 @@ func (f *ProviderWhitelistFetcher) resolveTokenForSource() string {
 func (f *ProviderWhitelistFetcher) loadFromFile() bool {
 	content, err := os.ReadFile(f.source)
 	if err != nil {
-		utils.LavaFormatError("failed reading provider whitelist file, keeping previous list", err, utils.LogAttr("source", f.source))
+		f.logLoadFailure("failed reading provider whitelist file", err)
 		return false
 	}
 	if err := f.target.UpdateFromBytes(content); err != nil {
-		utils.LavaFormatError("failed parsing provider whitelist file, keeping previous list", err, utils.LogAttr("source", f.source))
+		f.logLoadFailure("failed parsing provider whitelist file", err)
 		return false
 	}
 	return true

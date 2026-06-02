@@ -57,6 +57,35 @@ func TestFetchAllRawFiles_GitHub(t *testing.T) {
 	require.True(t, gotBodies[bBody])
 }
 
+// TestFetchAllRawFiles_PartialFailureTolerantVsStrict pins the two opposite contracts that share
+// this fetch path. The directory lists two files but only a.json is served (b.json -> 404), so the
+// fetch is partial. FetchAllRawFiles (spec default) tolerates it and returns the one file that
+// succeeded; the strict mode used by the whitelist (Config.FailOnPartial) instead fails the whole
+// fetch so the caller can keep its last-known-good snapshot rather than swap in a partial set.
+func TestFetchAllRawFiles_PartialFailureTolerantVsStrict(t *testing.T) {
+	const repoURL = "https://github.com/owner/repo/tree/main/dir"
+	listing := `[{"name":"a.json","type":"file"},{"name":"b.json","type":"file"}]`
+	aBody := `{"providers":[{"address":"provider0","chains":["ETH1"]}]}`
+	responses := map[string]string{
+		"https://api.github.com/repos/owner/repo/contents/dir?ref=main": listing,
+		"https://raw.githubusercontent.com/owner/repo/main/dir/a.json":  aBody,
+		// b.json is intentionally absent -> the mock returns 404 for it (a per-file fetch failure).
+	}
+
+	// Tolerant (spec default): partial failure still returns the files that succeeded.
+	tolerant := newMockFetcher(responses)
+	files, err := tolerant.FetchAllRawFiles(context.Background(), repoURL)
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+
+	// Strict (whitelist): any per-file failure fails the whole fetch.
+	strictConfig := Config{HTTPClient: &http.Client{Transport: &mockRoundTripper{responses: responses}}, FailOnPartial: true}
+	strict := New(strictConfig)
+	_, err = strict.FetchAllRawFiles(context.Background(), repoURL)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "partial fetch failure")
+}
+
 // TestFetchAllSpecs_GitHubStillWorks guards the behavior-preserving refactor: FetchAllSpecs now
 // layers on FetchAllRawFiles, and must still parse the fetched files into specs keyed by index.
 func TestFetchAllSpecs_GitHubStillWorks(t *testing.T) {
