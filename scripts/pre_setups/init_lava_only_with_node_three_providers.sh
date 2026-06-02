@@ -85,6 +85,29 @@ $EXTRA_PROVIDER_FLAGS --geolocation 1 --log_level debug --from servicer3 --chain
 
 wait_next_block
 
+# Provider whitelist: build the list from the ACTUAL staked provider addresses, since keys are
+# regenerated on every setup (a hardcoded list would exclude all providers next run). We allow
+# servicer1 and servicer3 for LAV1 and intentionally leave servicer2 out, so the consumer is seen
+# relaying only to the two whitelisted providers (servicer2 is filtered). Written to a gitignored
+# path under testutil/debugging.
+PROVIDER_WHITELIST_FILE="${__dir}/../../testutil/debugging/provider_whitelist.json"
+WHITELIST_PROVIDER_1=$(lavad keys show servicer1 -a)
+WHITELIST_PROVIDER_3=$(lavad keys show servicer3 -a)
+cat > "$PROVIDER_WHITELIST_FILE" <<EOF
+{
+  "providers": [
+    { "address": "$WHITELIST_PROVIDER_1", "chains": ["LAV1"] },
+    { "address": "$WHITELIST_PROVIDER_3", "chains": ["LAV1"] }
+  ]
+}
+EOF
+echo "[Provider Whitelist] wrote $PROVIDER_WHITELIST_FILE (allow servicer1=$WHITELIST_PROVIDER_1, servicer3=$WHITELIST_PROVIDER_3; servicer2 excluded)"
+
+#screen -d -m -S consumers bash -c "source ~/.bashrc; lavap rpcconsumer \
+#127.0.0.1:3360 LAV1 rest 127.0.0.1:3361 LAV1 tendermintrpc 127.0.0.1:3362 LAV1 grpc \
+#--providers-whitelist-config '$PROVIDER_WHITELIST_FILE' --providers-whitelist-refresh-interval 30s \
+#$EXTRA_PORTAL_FLAGS --geolocation 1 --log_level trace --from user1 --chain-id lava --cache-be 127.0.0.1:20100 --allow-insecure-provider-dialing --metrics-listen-address ":7779" 2>&1 | tee $LOGS_DIR/CONSUMERS.log" && sleep 0.25
+
 screen -d -m -S consumers bash -c "source ~/.bashrc; lavap rpcconsumer \
 127.0.0.1:3360 LAV1 rest 127.0.0.1:3361 LAV1 tendermintrpc 127.0.0.1:3362 LAV1 grpc \
 $EXTRA_PORTAL_FLAGS --geolocation 1 --log_level trace --from user1 --chain-id lava --cache-be 127.0.0.1:20100 --allow-insecure-provider-dialing --metrics-listen-address ":7779" 2>&1 | tee $LOGS_DIR/CONSUMERS.log" && sleep 0.25
