@@ -38,7 +38,13 @@ If the script fails to spawn `provider1`/`consumers` screens or `PROVIDER1.log` 
 
 ## Step 2 — Re-probe a deterministic minimal set
 
-Probe these exactly, in order:
+**Before the first probe**, record the end of both logs (as Phase 8 Step 4 does) so Step 3 can scan only the probe window:
+
+```bash
+wc -l testutil/debugging/logs/PROVIDER1.log testutil/debugging/logs/CONSUMERS.log
+```
+
+Note the counts `P0`/`C0`. Then probe these exactly, in order:
 
 1. `GET_BLOCKNUM` parse directive — same call as Phase 8.
 2. `chain-id` verification — call the verification method and confirm response matches the spec's `expected_value`.
@@ -56,6 +62,17 @@ For each probe:
 - If it was PASS in Phase 8 and is now FAIL or TIMEOUT → **REGRESSION**.
 - If it was FAIL/WARN/TIMEOUT in Phase 8 and is now PASS → improvement (record but do not alert).
 - All else → no change.
+
+Then scan the probe window in both logs for errors the response classification can hide — same patterns and benign allow-list as Phase 8 Step 4.5:
+
+```bash
+BENIGN='Self signed certificate|OTel SDK reported|:4318|could not get block data in Chain Tracker|UNKNOWN_BLOCK|DB Not Found Error'
+tail -n +$((P0+1)) testutil/debugging/logs/PROVIDER1.log | grep -E '\b(WRN|ERR|FTL|PNC)\b' | grep -Ev "$BENIGN" || true
+tail -n +$((C0+1)) testutil/debugging/logs/CONSUMERS.log | grep -E '\b(ERR|FTL|PNC)\b' | grep -Ev "$BENIGN" \
+  | grep -oE '\\"method\\":\\"[a-zA-Z0-9_]+' | sed -E 's/.*\\"/method=/' | sort | uniq -c
+```
+
+If any of the 7 probed items that was PASS in Phase 8 now produces a non-benign relay `ERR` in CONSUMERS.log (mapped via its `request=`/`method=` field), treat it as a **REGRESSION** even if the consumer response itself looked acceptable. An `FTL`/`PNC` after boot is also a regression.
 
 ## Step 4 — Tear down
 

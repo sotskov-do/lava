@@ -423,7 +423,7 @@ Agent(description: "Boot local provider + probe methods for <chain>",
       prompt: <local-provider-tester.md with placeholders substituted>)
 ```
 
-When the subagent returns, it reports a short summary (counts + FAIL/TIMEOUT method names + teardown status) and the path to `specs/docs/<chain>/METHOD_PROBE_REPORT.md`. Read the report from disk if you need detail — do not ask the subagent to echo it back.
+When the subagent returns, it reports a short summary (counts including `LOG_WARN` + FAIL/TIMEOUT method names + any methods downgraded to WARN by the probe-window log scan + teardown status) and the path to `specs/docs/<chain>/METHOD_PROBE_REPORT.md`. Read the report from disk if you need detail — do not ask the subagent to echo it back. Carry the log-scan WARNs into the Phase 9 reviewers and the Phase 10 fix list, the same as FAIL methods.
 
 If the subagent reports `SMOKE: BOOT_FAILED` or otherwise indicates the provider could not boot, present the error to the user and STOP. Do not proceed to Phase 9.
 
