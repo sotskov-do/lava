@@ -11,6 +11,21 @@ The skill orchestrates a 12-phase pipeline. It does NOT generate documentation, 
 
 `build-spec` and `create-lava-spec` are NOT replaced by this skill — they remain on disk untouched.
 
+## Model assignment (per-role)
+
+This skill is cost-optimized as a **hybrid**: the orchestrator (you) inherits whatever model the session runs, while dispatched subagents carry an explicit `model:` per role. Every `Agent(...)` template below already includes the `model:` value to copy. Rationale and override paths:
+
+| Role | Phase | `model:` | Why |
+|---|---|---|---|
+| Orchestrator (synthesis, gate judgment) | 4, 5, 10 | *(inherits session)* | Correctness-critical — run the session on **opus** (or **sonnet** if cost-bound) |
+| Research agents | 3 | `sonnet` | Web search + extraction; token-heavy, so the cheaper tier matters most here |
+| Static validators | 6 | `haiku` | Deterministic-leaning, several jq-backed. **Bump `cu-semantic` / `parse-directive` / `methods-coverage` to `sonnet`** if they emit false PASSes on complex chains |
+| Reviewers (`/review-spec`) | 9, 11 | `sonnet` | Judgment-heavy safety net; **bump to `opus`** if reviews miss issues on hard chains |
+| Fixers | 6, 10 | `sonnet` | Apply a given edit list — needs care but not deep reasoning |
+| Provider boot + probe | 8, 10b | `sonnet` | Mostly bash/build/curl execution |
+
+To run the whole skill on one tier, ignore the per-role values and set every dispatch's `model:` the same (or drop it to inherit). The `run_stats` report at Phase 12 prints which model(s) actually ran.
+
 ## Output target
 
 - **Path:** `specs/testnet-2/specs/<chain>.json` (lowercase filename matching the mainnet `index` lowercased — e.g. `iota.json`, `polygon.json`)
@@ -30,7 +45,14 @@ To read a reference file fully:
 
 ## Phase 1 — Pre-flight
 
-Check whether `specs/testnet-2/specs/<chain>.json` already exists, where `<chain>` is the lowercased mainnet index the user wants to add.
+**First action of the run — record the start time** so Phase 12 can report wall-clock elapsed and scope the token tally to this run only:
+
+```bash
+date +%s > /tmp/create_spec_run_start.epoch
+cat /tmp/create_spec_run_start.epoch
+```
+
+Then check whether `specs/testnet-2/specs/<chain>.json` already exists, where `<chain>` is the lowercased mainnet index the user wants to add.
 
 Run:
 
@@ -73,11 +95,11 @@ Substitute placeholders (`{chain_name}`, `{chain_index_lower}`, `{docs_url}`, `{
 Dispatch all five in a single message:
 
 ```
-Agent(description: "Research api-docs for {chain}", subagent_type: "general-purpose", run_in_background: true, prompt: <api-docs-researcher.md with placeholders substituted>)
-Agent(description: "Research chain metadata for {chain}", subagent_type: "general-purpose", run_in_background: true, prompt: <chain-metadata-researcher.md with placeholders substituted>)
-Agent(description: "Find upstream parent spec for {chain}", subagent_type: "general-purpose", run_in_background: true, prompt: <upstream-spec-scout.md with placeholders substituted>)
-Agent(description: "Detect plugins/extensions for {chain}", subagent_type: "general-purpose", run_in_background: true, prompt: <plugin-researcher.md with placeholders substituted>)
-Agent(description: "Research archive/prune for {chain}", subagent_type: "general-purpose", run_in_background: true, prompt: <archive-researcher.md with placeholders substituted>)
+Agent(description: "Research api-docs for {chain}", subagent_type: "general-purpose", model: "sonnet", run_in_background: true, prompt: <api-docs-researcher.md with placeholders substituted>)
+Agent(description: "Research chain metadata for {chain}", subagent_type: "general-purpose", model: "sonnet", run_in_background: true, prompt: <chain-metadata-researcher.md with placeholders substituted>)
+Agent(description: "Find upstream parent spec for {chain}", subagent_type: "general-purpose", model: "sonnet", run_in_background: true, prompt: <upstream-spec-scout.md with placeholders substituted>)
+Agent(description: "Detect plugins/extensions for {chain}", subagent_type: "general-purpose", model: "sonnet", run_in_background: true, prompt: <plugin-researcher.md with placeholders substituted>)
+Agent(description: "Research archive/prune for {chain}", subagent_type: "general-purpose", model: "sonnet", run_in_background: true, prompt: <archive-researcher.md with placeholders substituted>)
 ```
 
 When all five agents complete (you will receive notifications), collect their reports.
@@ -308,18 +330,18 @@ Gather inputs:
 - `<retention_blocks>` — integer block count from archive-researcher's `retention_blocks` output, or the literal `unknown`. Passed to `pruning-validator`.
 - `<research_unsupported>` — distilled list of methods research explicitly flagged unsupported/deprecated/`-32601` (from api-docs-researcher / plugin-researcher reports). May be empty. Passed to `enabled-validator`.
 
-**Dispatch all 9 in a single message, each with `subagent_type: general-purpose`, `run_in_background: true`, NO `isolation`:**
+**Dispatch all 9 in a single message, each with `subagent_type: general-purpose`, `run_in_background: true`, NO `isolation`.** Validators run on `haiku` by default (deterministic-leaning, several jq-backed); the three semantic gates — `cu-semantic`, `parse-directive`, `methods-coverage` — are marked `sonnet` because they involve judgment. Downgrade those three to `haiku` for max savings, or upgrade the rest to `sonnet` if Phase 6 lets defects through:
 
 ```
-Agent(description: "Gate: methods coverage", subagent_type: "general-purpose", run_in_background: true, prompt: <methods-coverage-validator.md with placeholders substituted>)
-Agent(description: "Gate: parse directives", subagent_type: "general-purpose", run_in_background: true, prompt: <parse-directive-validator.md with placeholders substituted>)
-Agent(description: "Gate: chain metadata", subagent_type: "general-purpose", run_in_background: true, prompt: <chain-metadata-validator.md with placeholders substituted>)
-Agent(description: "Gate: verifications", subagent_type: "general-purpose", run_in_background: true, prompt: <verifications-validator.md with placeholders substituted>)
-Agent(description: "Gate: extensions", subagent_type: "general-purpose", run_in_background: true, prompt: <extensions-validator.md with placeholders substituted>)
-Agent(description: "Gate: cu semantic", subagent_type: "general-purpose", run_in_background: true, prompt: <cu-semantic-validator.md with placeholders substituted>)
-Agent(description: "Gate: pruning", subagent_type: "general-purpose", run_in_background: true, prompt: <pruning-validator.md with placeholders substituted>)
-Agent(description: "Gate: enabled", subagent_type: "general-purpose", run_in_background: true, prompt: <enabled-validator.md with placeholders substituted>)
-Agent(description: "Gate: method schema", subagent_type: "general-purpose", run_in_background: true, prompt: <method-schema-validator.md with placeholders substituted>)
+Agent(description: "Gate: methods coverage", subagent_type: "general-purpose", model: "sonnet", run_in_background: true, prompt: <methods-coverage-validator.md with placeholders substituted>)
+Agent(description: "Gate: parse directives", subagent_type: "general-purpose", model: "sonnet", run_in_background: true, prompt: <parse-directive-validator.md with placeholders substituted>)
+Agent(description: "Gate: chain metadata", subagent_type: "general-purpose", model: "haiku", run_in_background: true, prompt: <chain-metadata-validator.md with placeholders substituted>)
+Agent(description: "Gate: verifications", subagent_type: "general-purpose", model: "haiku", run_in_background: true, prompt: <verifications-validator.md with placeholders substituted>)
+Agent(description: "Gate: extensions", subagent_type: "general-purpose", model: "haiku", run_in_background: true, prompt: <extensions-validator.md with placeholders substituted>)
+Agent(description: "Gate: cu semantic", subagent_type: "general-purpose", model: "sonnet", run_in_background: true, prompt: <cu-semantic-validator.md with placeholders substituted>)
+Agent(description: "Gate: pruning", subagent_type: "general-purpose", model: "haiku", run_in_background: true, prompt: <pruning-validator.md with placeholders substituted>)
+Agent(description: "Gate: enabled", subagent_type: "general-purpose", model: "haiku", run_in_background: true, prompt: <enabled-validator.md with placeholders substituted>)
+Agent(description: "Gate: method schema", subagent_type: "general-purpose", model: "haiku", run_in_background: true, prompt: <method-schema-validator.md with placeholders substituted>)
 ```
 
 ### Aggregate + single-pass fixer
@@ -338,7 +360,7 @@ A gate's `RESULT: FAIL` (cu-semantic Layer-0 subscription-CU violation or Layer-
 **If any RESULT is FAIL**:
 
 1. Print to the user the aggregated report — one section per failed gate, with the `=== GATE: <name> ===` block from that subagent's response.
-2. Dispatch one `general-purpose` fixer subagent with the deduplicated FAIL list. Prompt:
+2. Dispatch one `general-purpose` fixer subagent (`model: "sonnet"`) with the deduplicated FAIL list. Prompt:
 
    > You are fixing a Lava blockchain spec. Read `specs/testnet-2/specs/<chain>.json` and the deduplicated FAIL list below from Phase 6's parallel-gate run. Apply EVERY listed fix in one pass. Do not touch any field not mentioned in the FAIL list. Do not refactor, reformat, or improve adjacent fields.
    >
@@ -420,6 +442,7 @@ If ZERO node URLs are available, do NOT silently skip: **STOP and ask the user t
 ```
 Agent(description: "Boot local provider + probe methods for <chain>",
       subagent_type: "general-purpose",
+      model: "sonnet",
       prompt: <local-provider-tester.md with placeholders substituted>)
 ```
 
@@ -441,7 +464,7 @@ rm -f specs/docs/<chain>/SPEC_REVIEW_GAPS.md
 rm -f specs/docs/<chain>/SPEC_REVIEW_GAPS_parallel_*.md
 ```
 
-Dispatch THREE Agent subagents in parallel via a SINGLE message, each with `subagent_type: general-purpose` and NO `isolation` parameter. Each subagent receives an `N` value (1, 2, or 3) so it knows which numbered output file to write. The prompt for reviewer N:
+Dispatch THREE Agent subagents in parallel via a SINGLE message, each with `subagent_type: general-purpose`, `model: "sonnet"` (bump to `opus` if reviews miss issues on hard chains), and NO `isolation` parameter. Each subagent receives an `N` value (1, 2, or 3) so it knows which numbered output file to write. The prompt for reviewer N:
 
 > You are reviewing a Lava blockchain spec. Your reviewer index is **N** (used in the output filename below).
 >
@@ -495,7 +518,7 @@ Snapshot the spec before fixing:
 cp specs/testnet-2/specs/<chain>.json /tmp/spec_<chain>_pre_fix.json
 ```
 
-Dispatch one `general-purpose` Agent subagent (no worktree needed — main filesystem) with this prompt:
+Dispatch one `general-purpose` Agent subagent (`model: "sonnet"`, no worktree needed — main filesystem) with this prompt:
 
 > You are fixing a Lava blockchain spec. Read `specs/testnet-2/specs/<chain>.json` and the deduplicated gap list below. Apply EVERY listed CRITICAL and MEDIUM fix in one pass. Do not touch any field not mentioned in the gap list. Do not refactor, reformat, or improve adjacent fields.
 >
@@ -527,6 +550,7 @@ Skip this phase entirely only if Phase 8 was skipped (i.e. the user explicitly c
 ```
 Agent(description: "Smoke re-test fixed spec for <chain>",
       subagent_type: "general-purpose",
+      model: "sonnet",
       prompt: <local-provider-smoke-tester.md with placeholders substituted>)
 ```
 
@@ -548,7 +572,7 @@ mv specs/docs/<chain>/SPEC_REVIEW_FIXES_*.md specs/docs/<chain>/_archive/ 2>/dev
 rm -f specs/docs/<chain>/SPEC_REVIEW_GAPS.md
 ```
 
-Dispatch ONE Agent subagent with `subagent_type: general-purpose` (no `isolation` parameter). The prompt:
+Dispatch ONE Agent subagent with `subagent_type: general-purpose`, `model: "sonnet"` (bump to `opus` if the final pass misses issues), and no `isolation` parameter. The prompt:
 
 > You are reviewing a Lava blockchain spec — final pass after fixes were applied.
 >
@@ -615,6 +639,15 @@ If a phase was skipped (e.g., Phase 8 skipped because user didn't supply node UR
 - ☐ Deposit amount confirmed                             (default "10001000ulava" written; user confirms)
 - ☐ Community feedback gathered (if applicable)
 ```
+
+After printing the checklist, emit the **run-stats report** so the user sees wall-clock time and real token consumption for this run. Read the run-start epoch captured in Phase 1 and pass it to `scripts/run_stats.sh`, which parses the actual `usage` blocks from this session's transcript plus every subagent transcript (NOT an estimate) and scopes the tally to entries at/after the start epoch:
+
+```bash
+START=$(cat /tmp/create_spec_run_start.epoch)
+.claude/skills/create-spec/scripts/run_stats.sh "$START"
+```
+
+Print the script's output verbatim to the user. Elapsed is computed from the first→last transcript timestamp in the run window (one server clock), so it does not depend on the machine's wall-clock at run end. If the start-epoch file is missing (e.g. Phase 1 marker was lost), run `scripts/run_stats.sh 0` instead — a `0` threshold covers the whole session transcript, so the token totals stay correct but elapsed will span the entire conversation rather than just this run; note that caveat to the user.
 
 After printing, terminate the skill. The user takes it from here (manual git operations, governance flow if applicable).
 
