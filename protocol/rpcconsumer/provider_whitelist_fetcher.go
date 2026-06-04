@@ -69,24 +69,9 @@ func (f *ProviderWhitelistFetcher) Start(ctx context.Context) {
 
 	// Initial load: retry quickly until the first success so the consumer doesn't relay in
 	// passthrough for a whole refresh interval if the source is briefly unavailable at startup.
-	if !f.loadOnce(ctx) {
-		retryInterval := providerWhitelistRetryInterval
-		if f.refreshInterval > 0 && f.refreshInterval < retryInterval {
-			retryInterval = f.refreshInterval
-		}
-		retry := time.NewTicker(retryInterval)
-		defer retry.Stop()
-	initialLoad:
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-retry.C:
-				if f.loadOnce(ctx) {
-					break initialLoad
-				}
-			}
-		}
+	if !f.loadOnce(ctx) && !f.retryInitialLoad(ctx) {
+		// ctx was cancelled before the first successful load.
+		return
 	}
 
 	ticker := time.NewTicker(f.refreshInterval)
@@ -97,6 +82,29 @@ func (f *ProviderWhitelistFetcher) Start(ctx context.Context) {
 			return
 		case <-ticker.C:
 			f.loadOnce(ctx)
+		}
+	}
+}
+
+// retryInitialLoad polls the source on a short interval until the first load succeeds, returning
+// true once it does. It returns false if ctx is cancelled first. The retry ticker is scoped to this
+// function so it stops as soon as the initial load completes, rather than ticking uselessly for the
+// rest of the fetcher's lifetime.
+func (f *ProviderWhitelistFetcher) retryInitialLoad(ctx context.Context) bool {
+	retryInterval := providerWhitelistRetryInterval
+	if f.refreshInterval > 0 && f.refreshInterval < retryInterval {
+		retryInterval = f.refreshInterval
+	}
+	retry := time.NewTicker(retryInterval)
+	defer retry.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-retry.C:
+			if f.loadOnce(ctx) {
+				return true
+			}
 		}
 	}
 }
