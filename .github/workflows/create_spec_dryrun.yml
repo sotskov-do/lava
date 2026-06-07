@@ -1,45 +1,54 @@
-# DRY-RUN of create_spec.yml — exercises the full plumbing (branch, real
-# claude-code-action call, commit, artifact, PR) WITHOUT the ~1.5h create-spec
-# pipeline. The Claude step just writes pr_body.md + a placeholder spec so we
-# can confirm: auth works, the `execution_file` output exists, the branch/commit/
-# artifact/PR wiring works, and the PR is authored by github-actions[bot].
+# PHASE-8 SMOKE for create_spec.yml — does NOT run the create-spec skill.
+# Instead it reproduces what create-spec Phase 8 does on the runner: build the
+# binaries, bootstrap a local lava node, stake a provider, boot provider+consumer
+# screens for an EXISTING in-repo spec, then probe the consumer. Purpose: flush
+# out boot-time dependency / environment gaps cheaply (~15-25 min) before paying
+# for a full ~1h30m opus create-spec run.
 #
-# Required secret: CLAUDE_CODE_OAUTH_TOKEN  (subscription auth; generate locally
-#   with `claude setup-token` on a Pro/Max account, then store as a repo secret).
-#   Also enable "Allow GitHub Actions to create and approve pull requests"
-#   (Settings -> Actions -> General -> Workflow permissions).
-# Manual trigger: Actions tab -> "Create Spec (dry-run)" -> Run workflow.
-# Clean up the throwaway branch + PR it creates after the test.
-name: "Create Spec (dry-run)"
+# No Claude/auth secrets needed. Defaults boot ETH1 against a public RPC.
+# Manual trigger: Actions tab -> "Create Spec (Phase 8 smoke)" -> Run workflow.
+name: "Create Spec (Phase 8 smoke)"
 
 on:
   workflow_dispatch:
     inputs:
-      chain_name:
-        description: "Human-readable chain name (e.g. Iota)"
-        required: true
+      spec_file:
+        description: "Extra spec file(s) CSV to add (existing in-repo spec)"
+        required: false
         type: string
-      chain_mainnet_index:
-        description: "Uppercase mainnet spec index (e.g. IOTA)"
-        required: true
+        default: "specs/mainnet-1/specs/ethereum.json"
+      chain_id:
+        description: "Chain id to stake/boot"
+        required: false
         type: string
-      chain_testnet_index:
-        description: "Uppercase testnet spec index (e.g. IOTAT)"
-        required: true
+        default: "ETH1"
+      api_interface:
+        description: "API interface (jsonrpc/rest/tendermintrpc/grpc)"
+        required: false
         type: string
+        default: "jsonrpc"
+      node_url:
+        description: "Upstream RPC URL the provider proxies to"
+        required: false
+        type: string
+        default: "https://ethereum-rpc.publicnode.com"
+      probe_body:
+        description: "JSON body to POST to the consumer (127.0.0.1:3360)"
+        required: false
+        type: string
+        default: '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
-  group: create-spec-dryrun
+  group: create-spec-phase8-smoke
   cancel-in-progress: false
 
 jobs:
-  create_spec_dryrun:
+  phase8_smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - name: Checkout main
         uses: actions/checkout@v4
@@ -47,108 +56,93 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Compute branch name
-        id: branch
-        env:
-          CHAIN_NAME: ${{ github.event.inputs.chain_name }}
-        run: |
-          chain_lower="$(printf '%s' "$CHAIN_NAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')"
-          if [ -z "$chain_lower" ]; then
-            echo "chain_name '$CHAIN_NAME' sanitizes to an empty branch slug" >&2
-            exit 1
-          fi
-          base="${chain_lower}-spec-dryrun"
-          name="$base"
-          if git ls-remote --exit-code --heads origin "$base" >/dev/null 2>&1; then
-            name="${base}-$(date +%d-%m-%Y)"
-          fi
-          echo "name=$name" >> "$GITHUB_OUTPUT"
-          echo "chain_lower=$chain_lower" >> "$GITHUB_OUTPUT"
-          git checkout -b "$name"
-          git push -u origin "$name"
-
-      - name: Run claude (dry-run prompt)
-        id: run
-        uses: anthropics/claude-code-action@v1
+      - name: Setup Go
+        uses: actions/setup-go@v5
         with:
-          # Subscription auth (Pro/Max) instead of an API key.
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          # Skip the OIDC->Claude-App exchange (no GitHub App install needed).
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          claude_args: |
-            --model haiku
-            --dangerously-skip-permissions
-            --max-turns 10
-          prompt: |
-            You are running in a CI smoke test. Do exactly these two things, then stop. Do NOT run any git commands.
+          go-version: "1.23.3"
 
-            1. Write a file named `pr_body.md` at the repository root containing this markdown:
-
-            ## Dry-run smoke test: ${{ github.event.inputs.chain_name }}
-
-            This PR was generated by the create_spec **dry-run** workflow to verify the GitHub Action plumbing (branch, commit, artifact, PR) and the claude-code-action integration. No real spec was generated.
-
-            - Mainnet index: ${{ github.event.inputs.chain_mainnet_index }}
-            - Testnet index: ${{ github.event.inputs.chain_testnet_index }}
-
-            2. Write a placeholder spec file at `specs/testnet-2/specs/${{ steps.branch.outputs.chain_lower }}.json` whose entire contents are exactly:
-
-            {"dryrun": true}
-
-      - name: Verify dry-run outputs
+      # Same prep as the real workflow: the boot script runs `make install-all`
+      # and drives everything inside `screen`; ensure its tools + PATH are ready.
+      - name: Prepare boot environment
         run: |
-          chain_lower="${{ steps.branch.outputs.chain_lower }}"
-          spec="specs/testnet-2/specs/${chain_lower}.json"
-          if [ ! -f "$spec" ]; then
-            echo "Placeholder spec $spec was not produced by the dry-run prompt" >&2
-            exit 1
-          fi
-          if [ ! -f pr_body.md ]; then
-            echo "pr_body.md was not produced by the dry-run prompt" >&2
-            exit 1
-          fi
-          echo "execution_file output: '${{ steps.run.outputs.execution_file }}'"
+          sudo apt-get update
+          sudo apt-get install -y screen psmisc jq
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      - name: Commit and push placeholder spec
+      - name: Write provider config
         env:
-          CHAIN_NAME: ${{ github.event.inputs.chain_name }}
+          CHAIN_ID: ${{ github.event.inputs.chain_id }}
+          API_INTERFACE: ${{ github.event.inputs.api_interface }}
+          NODE_URL: ${{ github.event.inputs.node_url }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add specs/testnet-2/specs/
-          git commit -m "test(ci): dry-run placeholder spec for ${CHAIN_NAME}"
-          git push origin "${{ steps.branch.outputs.name }}"
+          cat > config/smoke_provider.yml <<EOF
+          endpoints:
+            - api-interface: ${API_INTERFACE}
+              chain-id: ${CHAIN_ID}
+              network-address:
+                address: 127.0.0.1:2220
+              node-urls:
+                - url: ${NODE_URL}
+          EOF
+          echo "--- provider config ---"
+          cat config/smoke_provider.yml
 
-      - name: Upload transcript artifact
+      # Reproduces create-spec Phase 8. The script itself runs `make install-all`,
+      # starts a node, passes spec-add + plans-add gov proposals, stakes a
+      # provider, and launches provider1 + consumers screens.
+      - name: Boot Phase 8 (build + node + provider + consumer)
+        env:
+          SPEC_FILE: ${{ github.event.inputs.spec_file }}
+          CHAIN_ID: ${{ github.event.inputs.chain_id }}
+          API_INTERFACE: ${{ github.event.inputs.api_interface }}
+        run: |
+          ./scripts/pre_setups/init_chain_only_with_node.sh \
+            "$SPEC_FILE" "$CHAIN_ID" "$API_INTERFACE" config/smoke_provider.yml
+
+      - name: Verify node and screens are up
+        run: |
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          echo "--- screens ---"
+          screen -ls || true
+          for s in node provider1 consumers; do
+            if ! screen -ls | grep -q "\.${s}\b"; then
+              echo "FAIL: expected screen session '$s' is not running" >&2
+              exit 1
+            fi
+          done
+          height="$(lavad status 2>/dev/null | jq -r '.SyncInfo.latest_block_height // .sync_info.latest_block_height // empty')"
+          echo "lava node height: '$height'"
+          if [ -z "$height" ] || [ "$height" -lt 1 ] 2>/dev/null; then
+            echo "FAIL: lava node did not reach a block height" >&2
+            exit 1
+          fi
+
+      # Probe via the local consumer (NOT the upstream node). Best-effort: pairing
+      # can take an epoch to propagate, so retry. A failure here is reported but
+      # does not fail the job — the boot/build/env checks above are the hard gate.
+      - name: Probe consumer (best-effort relay)
+        env:
+          PROBE_BODY: ${{ github.event.inputs.probe_body }}
+        run: |
+          ok=0
+          for i in $(seq 1 30); do
+            resp="$(curl -s -m 8 -X POST http://127.0.0.1:3360 \
+              -H 'Content-Type: application/json' --data "$PROBE_BODY" || true)"
+            echo "attempt $i: $resp"
+            if echo "$resp" | jq -e '.result != null' >/dev/null 2>&1; then
+              ok=1; echo "consumer relay OK"; break
+            fi
+            sleep 10
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "::warning::consumer relay did not return a result (pairing delay or upstream RPC issue); boot machinery still validated"
+          fi
+
+      - name: Upload boot logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: create-spec-dryrun-transcript
+          name: phase8-smoke-logs
           path: |
-            ${{ steps.run.outputs.execution_file }}
-            pr_body.md
+            testutil/debugging/logs/*.log
           if-no-files-found: warn
-
-      - name: Open pull request
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          CHAIN: ${{ github.event.inputs.chain_name }}
-        run: |
-          branch="${{ steps.branch.outputs.name }}"
-          chain="$CHAIN"
-
-          if [ ! -f pr_body.md ]; then
-            printf '## Dry-run: %s\n\n_pr_body.md was not produced; see run logs._\n' "$chain" > pr_body.md
-          fi
-
-          {
-            printf '\n\n---\n'
-            printf '🤖 DRY-RUN of `create_spec.yml` · [workflow run](%s) · transcript in run artifacts\n' "$RUN_URL"
-          } >> pr_body.md
-
-          gh pr create \
-            --base main \
-            --head "$branch" \
-            --title "test(dry-run): create_spec plumbing for ${chain}" \
-            --body-file pr_body.md
