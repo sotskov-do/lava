@@ -64,5 +64,4 @@ docs/
 agent_docs/
 /readme-docs/
 mock-node-server/
-.claude/
 Claude.md
