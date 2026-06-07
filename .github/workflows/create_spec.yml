@@ -1,5 +1,12 @@
-# Required repository secrets:
-#   ANTHROPIC_API_KEY  - Claude Code auth for anthropics/claude-code-action
+# One-time repository setup required before this workflow works:
+#   1. Secret ANTHROPIC_API_KEY  - Claude Code auth for anthropics/claude-code-action
+#   2. Settings -> Actions -> General -> Workflow permissions ->
+#      enable "Allow GitHub Actions to create and approve pull requests"
+#      (without it, the `gh pr create` step fails: "GitHub Actions is not
+#      permitted to create or approve pull requests"). Equivalent CLI:
+#        gh api -X PUT /repos/<owner>/<repo>/actions/permissions/workflow \
+#          -f default_workflow_permissions=write -F can_approve_pull_request_reviews=true
+#   3. The create-spec skill must be present on `main` (PR #2300 merged).
 #
 # The PR is opened with the automatic GITHUB_TOKEN (author: github-actions[bot]).
 # NOTE: GitHub does not auto-run pull_request CI for a GITHUB_TOKEN-opened PR;

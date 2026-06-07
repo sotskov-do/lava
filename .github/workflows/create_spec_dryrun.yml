@@ -4,7 +4,10 @@
 # can confirm: auth works, the `execution_file` output exists, the branch/commit/
 # artifact/PR wiring works, and the PR is authored by github-actions[bot].
 #
-# Required secret: ANTHROPIC_API_KEY
+# Required secret: CLAUDE_CODE_OAUTH_TOKEN  (subscription auth; generate locally
+#   with `claude setup-token` on a Pro/Max account, then store as a repo secret).
+#   Also enable "Allow GitHub Actions to create and approve pull requests"
+#   (Settings -> Actions -> General -> Workflow permissions).
 # Manual trigger: Actions tab -> "Create Spec (dry-run)" -> Run workflow.
 # Clean up the throwaway branch + PR it creates after the test.
 name: "Create Spec (dry-run)"
@@ -68,7 +71,8 @@ jobs:
         id: run
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Subscription auth (Pro/Max) instead of an API key.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Skip the OIDC->Claude-App exchange (no GitHub App install needed).
           github_token: ${{ secrets.GITHUB_TOKEN }}
           claude_args: |
