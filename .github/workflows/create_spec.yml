@@ -48,8 +48,12 @@ permissions:
   contents: write
   pull-requests: write
 
+# Per-chain: serialize only runs for the SAME chain (they race on the same
+# branch/PR). Different chains run in parallel — each run gets its own VM, so the
+# boot script's hardcoded ports/screens don't collide across runs. (Use a single
+# static group instead only if you move to a self-hosted runner shared by runs.)
 concurrency:
-  group: create-spec
+  group: create-spec-${{ github.event.inputs.chain_name }}
   cancel-in-progress: false
 
 jobs:
