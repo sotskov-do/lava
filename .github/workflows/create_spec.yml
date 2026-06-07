@@ -1,5 +1,8 @@
 # One-time repository setup required before this workflow works:
-#   1. Secret ANTHROPIC_API_KEY  - Claude Code auth for anthropics/claude-code-action
+#   1. Secret CLAUDE_CODE_OAUTH_TOKEN - subscription auth (Pro/Max). Generate
+#      locally with `claude setup-token`, then store as a repo secret. The token
+#      expires and must be rotated periodically. (Swap to anthropic_api_key +
+#      ANTHROPIC_API_KEY secret if subscription quotas throttle the full run.)
 #   2. Settings -> Actions -> General -> Workflow permissions ->
 #      enable "Allow GitHub Actions to create and approve pull requests"
 #      (without it, the `gh pr create` step fails: "GitHub Actions is not
@@ -84,7 +87,11 @@ jobs:
         id: run
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Subscription auth (Pro/Max). Generate locally with `claude setup-token`
+          # and store as the CLAUDE_CODE_OAUTH_TOKEN secret. NOTE: a full run is
+          # ~1h30m on opus with ~20 subagents — heavy against subscription quotas;
+          # it may throttle or hit weekly caps. Swap to anthropic_api_key if so.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Pass GITHUB_TOKEN directly so the action skips the OIDC->Claude-App
           # token exchange (avoids needing the Claude GitHub App installed and the
           # id-token: write permission). Maps to OVERRIDE_GITHUB_TOKEN internally.
