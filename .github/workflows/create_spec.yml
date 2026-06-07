@@ -1,0 +1,187 @@
+# Required repository secrets:
+#   ANTHROPIC_API_KEY  - Claude Code auth for anthropics/claude-code-action
+#
+# The PR is opened with the automatic GITHUB_TOKEN (author: github-actions[bot]).
+# NOTE: GitHub does not auto-run pull_request CI for a GITHUB_TOKEN-opened PR;
+# push a commit or close/reopen the PR to trigger checks.
+#
+# Manual trigger: Actions tab -> "Create Spec" -> Run workflow.
+name: "Create Spec"
+
+on:
+  workflow_dispatch:
+    inputs:
+      chain_name:
+        description: "Human-readable chain name (e.g. Iota)"
+        required: true
+        type: string
+      chain_mainnet_index:
+        description: "Uppercase mainnet spec index (e.g. IOTA)"
+        required: true
+        type: string
+      chain_testnet_index:
+        description: "Uppercase testnet spec index (e.g. IOTAT)"
+        required: true
+        type: string
+      additional_data:
+        description: "Free text: docs URLs, node URLs, inheritance hints, etc."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: create-spec
+  cancel-in-progress: false
+
+jobs:
+  create_spec:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Compute branch name
+        id: branch
+        env:
+          CHAIN_NAME: ${{ github.event.inputs.chain_name }}
+        run: |
+          chain_lower="$(printf '%s' "$CHAIN_NAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')"
+          if [ -z "$chain_lower" ]; then
+            echo "chain_name '$CHAIN_NAME' sanitizes to an empty branch slug" >&2
+            exit 1
+          fi
+          base="${chain_lower}-spec"
+          name="$base"
+          if git ls-remote --exit-code --heads origin "$base" >/dev/null 2>&1; then
+            name="${base}-$(date +%d-%m-%Y)"
+          fi
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "chain_lower=$chain_lower" >> "$GITHUB_OUTPUT"
+          git checkout -b "$name"
+          git push -u origin "$name"
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.3"
+
+      - name: Run create-spec
+        id: run
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: |
+            --model opus
+            --dangerously-skip-permissions
+            --max-turns 1000
+          prompt: |
+            Run the /create-spec skill end-to-end for a new chain, fully unattended.
+
+            Phase 2 inputs (do NOT ask me for these — use exactly these values):
+            - Chain name: ${{ github.event.inputs.chain_name }}
+            - Mainnet spec index: ${{ github.event.inputs.chain_mainnet_index }}
+            - Testnet spec index: ${{ github.event.inputs.chain_testnet_index }}
+            - Additional data (docs URLs, node URLs, inheritance hints): ${{ github.event.inputs.additional_data }}
+
+            Execution rules for this unattended CI run:
+            - Run the FULL 12-phase pipeline, INCLUDING the Phase 8 local provider boot and the Phase 10b re-probe.
+            - There is NO human available. At EVERY STOP-and-ask gate (archive
+              extension include/omit, block-time disagreement >20%, existing-file
+              prompt, archive NEEDS_HUMAN_DECISION), DO NOT stop — auto-decide with
+              the conservative default and continue.
+            - Track every auto-decision you make and the sources you relied on
+              (docs URLs, RPC node URLs probed, upstream parent spec, other refs).
+            - Do NOT perform any git operations. The workflow handles commit/push/PR.
+
+            When the pipeline is complete, write a file `pr_body.md` at the repo
+            root with EXACTLY this structure, filled in:
+
+            ## New chain spec: ${{ github.event.inputs.chain_name }}
+
+            | Field | Value |
+            |-------|-------|
+            | Chain name | ${{ github.event.inputs.chain_name }} |
+            | Mainnet index | ${{ github.event.inputs.chain_mainnet_index }} |
+            | Testnet index | ${{ github.event.inputs.chain_testnet_index }} |
+            | Spec file | specs/testnet-2/specs/<chain>.json |
+
+            ### Inputs provided
+            ${{ github.event.inputs.additional_data }}
+
+            ### Sources used
+            - **Docs:** <doc URLs cited>
+            - **RPC nodes:** <mainnet + testnet node URLs probed>
+            - **Upstream parent spec:** <parent spec imported, if any>
+            - **Other references:** <anything else relied on>
+
+            ### Calculations table
+            <the Phase-4 network-params calculations table>
+
+            ### ⚠️ Auto-decisions made (review these)
+            <every STOP gate you auto-resolved and the default you chose>
+
+      - name: Verify spec produced
+        id: verify
+        run: |
+          chain_lower="${{ steps.branch.outputs.chain_lower }}"
+          spec="specs/testnet-2/specs/${chain_lower}.json"
+          if [ ! -f "$spec" ]; then
+            echo "Expected spec file $spec was not produced by create-spec" >&2
+            exit 1
+          fi
+          echo "spec=$spec" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push spec
+        env:
+          CHAIN_NAME: ${{ github.event.inputs.chain_name }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add specs/testnet-2/specs/
+          git commit -m "feat(spec): add ${CHAIN_NAME} chain spec"
+          git push origin "${{ steps.branch.outputs.name }}"
+
+      - name: Upload transcript artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: create-spec-transcript
+          path: |
+            ${{ steps.run.outputs.execution_file }}
+            pr_body.md
+          if-no-files-found: warn
+
+      - name: Open pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CHAIN: ${{ github.event.inputs.chain_name }}
+        run: |
+          branch="${{ steps.branch.outputs.name }}"
+          chain="$CHAIN"
+
+          # Fallback stub if create-spec did not write pr_body.md
+          if [ ! -f pr_body.md ]; then
+            printf '## New chain spec: %s\n\n_pr_body.md was not produced; see run logs._\n' "$chain" > pr_body.md
+          fi
+
+          # Append run/artifact footer
+          {
+            printf '\n\n---\n'
+            printf '🤖 Generated by `create_spec.yml` · [workflow run](%s) · full transcript in run artifacts\n' "$RUN_URL"
+            printf '🤖 Generated with [Claude Code](https://claude.com/claude-code)\n'
+          } >> pr_body.md
+
+          gh pr create \
+            --base main \
+            --head "$branch" \
+            --title "feat(spec): add ${chain} chain spec" \
+            --body-file pr_body.md
