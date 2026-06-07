@@ -38,6 +38,11 @@ on:
         required: false
         type: string
         default: ""
+      show_full_output:
+        description: "Stream ALL Claude messages live (watch phase progress / detect a stall). WARNING: dumps tool results to the PUBLIC run log — may expose URLs/keys."
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -121,6 +126,11 @@ jobs:
           # token exchange (avoids needing the Claude GitHub App installed and the
           # id-token: write permission). Maps to OVERRIDE_GITHUB_TOKEN internally.
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          # Live visibility into phase progress / stalls. Off by default (dumps
+          # tool results to the PUBLIC log); flip the show_full_output dispatch
+          # input on per run when debugging. display_report posts a safe summary.
+          show_full_output: ${{ inputs.show_full_output }}
+          display_report: true
           claude_args: |
             --model opus
             --dangerously-skip-permissions
