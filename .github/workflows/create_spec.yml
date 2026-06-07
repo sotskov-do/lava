@@ -83,20 +83,29 @@ jobs:
         with:
           go-version: "1.23.3"
 
+      # Node 22 guarantees a global `WebSocket` so the agent can probe ws/
+      # subscription chains (eth_subscribe) through the consumer without npm installs.
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       # Phase 8 of create-spec builds the binaries itself: its boot script
       # scripts/pre_setups/init_chain_only_with_node.sh runs `make install-all`
       # (installs lavad/lavap into $(go env GOPATH)/bin) and drives everything
       # inside `screen` sessions. Tool audit of the boot + live-probe path:
       #   needed & preinstalled on ubuntu-latest: jq, curl, make, awk, sed,
-      #     timeout, tee, python3, node;
-      #   needed & MISSING on a clean runner: screen, killall (psmisc);
-      #   NOT needed: grpcurl, protoc, websocat, buf (no gRPC/ws CLI probes).
-      # jq is installed explicitly below so the dependency is robust to runner
-      # image changes (no-op if already present). lavad/lavap need GOPATH/bin on PATH.
+      #     timeout, tee, python3, node (Node 22 pinned above for WebSocket);
+      #   needed & MISSING on a clean runner: screen, killall (psmisc), grpcurl
+      #     (gRPC probes) — installed below;
+      #   NOT needed: protoc, websocat, buf.
+      # jq is installed explicitly so the dependency is robust to runner image
+      # changes. lavad/lavap + grpcurl need GOPATH/bin on PATH.
       - name: Prepare boot environment (for create-spec Phase 8)
         run: |
           sudo apt-get update
           sudo apt-get install -y screen psmisc jq
+          go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Run create-spec

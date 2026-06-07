@@ -1,42 +1,20 @@
 # PHASE-8 SMOKE for create_spec.yml — does NOT run the create-spec skill.
-# Instead it reproduces what create-spec Phase 8 does on the runner: build the
-# binaries, bootstrap a local lava node, stake a provider, boot provider+consumer
-# screens for an EXISTING in-repo spec, then probe the consumer. Purpose: flush
-# out boot-time dependency / environment gaps cheaply (~15-25 min) before paying
-# for a full ~1h30m opus create-spec run.
+# Reproduces what create-spec Phase 8 does on the runner (build via
+# `make install-all`, bootstrap a node, gov-add specs/plans, stake a provider,
+# boot provider+consumer screens) for EXISTING in-repo specs, then probes the
+# local consumer. Purpose: flush out boot-time dependency / environment gaps
+# cheaply (~15-25 min) before paying for a full ~1h30m opus create-spec run.
 #
-# No Claude/auth secrets needed. Defaults boot ETH1 against a public RPC.
-# Manual trigger: Actions tab -> "Create Spec (Phase 8 smoke)" -> Run workflow.
+# Each matrix leg boots a chain and probes ONLY the interface that chain serves:
+#   - eth-jsonrpc-ws : ETH1 over jsonrpc + a websocket subscription (eth_subscribe)
+#   - lava-grpc      : LAV1 over gRPC (local node 127.0.0.1:9090), probed via grpcurl
+# Legs run on separate runners, so there is no provider-boot port/screen collision.
+#
+# No Claude/auth secrets needed. Manual trigger only.
 name: "Create Spec (Phase 8 smoke)"
 
 on:
   workflow_dispatch:
-    inputs:
-      spec_file:
-        description: "Extra spec file(s) CSV to add (existing in-repo spec)"
-        required: false
-        type: string
-        default: "specs/mainnet-1/specs/ethereum.json"
-      chain_id:
-        description: "Chain id to stake/boot"
-        required: false
-        type: string
-        default: "ETH1"
-      api_interface:
-        description: "API interface (jsonrpc/rest/tendermintrpc/grpc)"
-        required: false
-        type: string
-        default: "jsonrpc"
-      node_url:
-        description: "Upstream RPC URL the provider proxies to"
-        required: false
-        type: string
-        default: "https://ethereum-rpc.publicnode.com"
-      probe_body:
-        description: "JSON body to POST to the consumer (127.0.0.1:3360)"
-        required: false
-        type: string
-        default: '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
 
 permissions:
   contents: read
@@ -47,8 +25,34 @@ concurrency:
 
 jobs:
   phase8_smoke:
+    name: "phase8-smoke (${{ matrix.name }})"
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: eth-jsonrpc-ws
+            spec_file: "specs/mainnet-1/specs/ethereum.json"
+            chain_id: "ETH1"
+            api_interface: "jsonrpc"
+            node_url: "https://ethereum-rpc.publicnode.com"
+            ws_node_url: "wss://ethereum-rpc.publicnode.com"
+            probe: "jsonrpc-ws"
+            probe_body: '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+            ws_subscribe_body: '{"jsonrpc":"2.0","method":"eth_subscribe","params":["newHeads"],"id":1}'
+          # LAV1 (lava, cosmos-sdk) genuinely has a gRPC interface and is always
+          # in the boot script's default spec list, so its provider proxies to the
+          # local node's gRPC at 127.0.0.1:9090. spec_file here is a harmless extra
+          # to satisfy the script's required arg (ETH1; LAV1 needs no extra).
+          - name: lava-grpc
+            spec_file: "specs/mainnet-1/specs/ethereum.json"
+            chain_id: "LAV1"
+            api_interface: "grpc"
+            node_url: "127.0.0.1:9090"
+            ws_node_url: ""
+            probe: "grpc"
+            grpc_method: "cosmos.base.tendermint.v1beta1.Service/GetLatestBlock"
     steps:
       - name: Checkout main
         uses: actions/checkout@v4
@@ -61,40 +65,49 @@ jobs:
         with:
           go-version: "1.23.3"
 
-      # Same prep as the real workflow: the boot script runs `make install-all`
-      # and drives everything inside `screen`; ensure its tools + PATH are ready.
+      # Node 22 gives a global `WebSocket` for the ws subscription probe.
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Same prep as the real workflow: boot tools + grpcurl (gRPC probe) + PATH.
       - name: Prepare boot environment
         run: |
           sudo apt-get update
           sudo apt-get install -y screen psmisc jq
+          go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Write provider config
         env:
-          CHAIN_ID: ${{ github.event.inputs.chain_id }}
-          API_INTERFACE: ${{ github.event.inputs.api_interface }}
-          NODE_URL: ${{ github.event.inputs.node_url }}
+          CHAIN_ID: ${{ matrix.chain_id }}
+          API_INTERFACE: ${{ matrix.api_interface }}
+          NODE_URL: ${{ matrix.node_url }}
+          WS_NODE_URL: ${{ matrix.ws_node_url }}
         run: |
-          cat > config/smoke_provider.yml <<EOF
-          endpoints:
-            - api-interface: ${API_INTERFACE}
-              chain-id: ${CHAIN_ID}
-              network-address:
-                address: 127.0.0.1:2220
-              node-urls:
-                - url: ${NODE_URL}
-          EOF
+          {
+            echo "endpoints:"
+            echo "  - api-interface: ${API_INTERFACE}"
+            echo "    chain-id: ${CHAIN_ID}"
+            echo "    network-address:"
+            echo "      address: 127.0.0.1:2220"
+            echo "    node-urls:"
+            echo "      - url: ${NODE_URL}"
+            # wss:// entry so subscription methods can reach upstream (per Phase 8 docs)
+            [ -n "$WS_NODE_URL" ] && echo "      - url: ${WS_NODE_URL}"
+          } > config/smoke_provider.yml
           echo "--- provider config ---"
           cat config/smoke_provider.yml
 
-      # Reproduces create-spec Phase 8. The script itself runs `make install-all`,
-      # starts a node, passes spec-add + plans-add gov proposals, stakes a
-      # provider, and launches provider1 + consumers screens.
+      # Reproduces create-spec Phase 8: `make install-all`, start node, pass
+      # spec-add + plans-add gov proposals, stake provider, launch provider1 +
+      # consumers screens.
       - name: Boot Phase 8 (build + node + provider + consumer)
         env:
-          SPEC_FILE: ${{ github.event.inputs.spec_file }}
-          CHAIN_ID: ${{ github.event.inputs.chain_id }}
-          API_INTERFACE: ${{ github.event.inputs.api_interface }}
+          SPEC_FILE: ${{ matrix.spec_file }}
+          CHAIN_ID: ${{ matrix.chain_id }}
+          API_INTERFACE: ${{ matrix.api_interface }}
         run: |
           ./scripts/pre_setups/init_chain_only_with_node.sh \
             "$SPEC_FILE" "$CHAIN_ID" "$API_INTERFACE" config/smoke_provider.yml
@@ -117,12 +130,14 @@ jobs:
             exit 1
           fi
 
-      # Probe via the local consumer (NOT the upstream node). Best-effort: pairing
-      # can take an epoch to propagate, so retry. A failure here is reported but
-      # does not fail the job — the boot/build/env checks above are the hard gate.
-      - name: Probe consumer (best-effort relay)
+      # All probes go through the LOCAL consumer (127.0.0.1:3360), NOT the upstream
+      # node. Best-effort: pairing takes an epoch to propagate, so retry; a failure
+      # is a warning, not a job failure — the boot/build/env checks above are the gate.
+
+      - name: Probe jsonrpc relay (best-effort)
+        if: ${{ contains(matrix.probe, 'jsonrpc') }}
         env:
-          PROBE_BODY: ${{ github.event.inputs.probe_body }}
+          PROBE_BODY: ${{ matrix.probe_body }}
         run: |
           ok=0
           for i in $(seq 1 30); do
@@ -130,19 +145,59 @@ jobs:
               -H 'Content-Type: application/json' --data "$PROBE_BODY" || true)"
             echo "attempt $i: $resp"
             if echo "$resp" | jq -e '.result != null' >/dev/null 2>&1; then
-              ok=1; echo "consumer relay OK"; break
+              ok=1; echo "jsonrpc relay OK"; break
             fi
             sleep 10
           done
-          if [ "$ok" -ne 1 ]; then
-            echo "::warning::consumer relay did not return a result (pairing delay or upstream RPC issue); boot machinery still validated"
-          fi
+          [ "$ok" -eq 1 ] || echo "::warning::jsonrpc relay returned no result (pairing/upstream); boot still validated"
+
+      # WebSocket: open ws://127.0.0.1:3360/ws, send a subscribe call, wait for a
+      # push message. Verifies the ws probe client (Node 22 WebSocket) + consumer ws.
+      - name: Probe websocket subscription (best-effort)
+        if: ${{ contains(matrix.probe, 'ws') && matrix.ws_node_url != '' }}
+        env:
+          WS_SUBSCRIBE_BODY: ${{ matrix.ws_subscribe_body }}
+        run: |
+          node --version
+          WS_SUBSCRIBE_BODY="$WS_SUBSCRIBE_BODY" node -e '
+            const body = process.env.WS_SUBSCRIBE_BODY;
+            const ws = new WebSocket("ws://127.0.0.1:3360/ws");
+            let gotPush = false;
+            const done = (msg) => { console.log(msg); try { ws.close(); } catch (e) {} process.exit(0); };
+            ws.onopen = () => { console.log("ws open; sending subscribe"); ws.send(body); };
+            ws.onerror = (e) => done("::warning::ws error: " + (e.message || e));
+            ws.onmessage = (e) => {
+              const d = e.data.toString();
+              console.log("ws msg:", d.slice(0, 200));
+              if (d.includes("\"params\"")) { gotPush = true; done("ws subscription push OK"); }
+            };
+            setTimeout(() => done(gotPush ? "ws OK" : "::warning::no ws push within 40s (boot still validated)"), 40000);
+          '
+
+      # gRPC: probe the consumer (which serves LAV1 gRPC) via grpcurl. Retries for
+      # pairing. Proves grpcurl + the consumer gRPC relay end-to-end.
+      - name: Probe gRPC relay (best-effort)
+        if: ${{ contains(matrix.probe, 'grpc') }}
+        env:
+          GRPC_METHOD: ${{ matrix.grpc_method }}
+        run: |
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          grpcurl -version 2>&1 || true
+          ok=0
+          for i in $(seq 1 30); do
+            if grpcurl -plaintext -max-time 8 127.0.0.1:3360 "$GRPC_METHOD" >/tmp/grpc_out.json 2>/tmp/grpc_err.txt; then
+              echo "attempt $i: grpc relay OK"; head -c 300 /tmp/grpc_out.json; ok=1; break
+            fi
+            echo "attempt $i: $(head -c 200 /tmp/grpc_err.txt)"
+            sleep 10
+          done
+          [ "$ok" -eq 1 ] || echo "::warning::grpc relay did not succeed (pairing/method); grpcurl installed + boot validated"
 
       - name: Upload boot logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: phase8-smoke-logs
+          name: phase8-smoke-logs-${{ matrix.name }}
           path: |
             testutil/debugging/logs/*.log
           if-no-files-found: warn
