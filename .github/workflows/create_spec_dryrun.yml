@@ -28,6 +28,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  id-token: write # claude-code-action@v1 requests an OIDC token at startup
 
 concurrency:
   group: create-spec-dryrun
