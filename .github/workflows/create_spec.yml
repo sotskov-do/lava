@@ -171,12 +171,30 @@ jobs:
               the conservative default and continue.
             - Track every auto-decision you make and the sources you relied on
               (docs URLs, RPC node URLs probed, upstream parent spec, other refs).
+            - The Phase 11 final reviewer ends in one of two verdicts: APPROVED
+              (final TALLY CRITICAL=0 MEDIUM=0) or CHANGES REQUESTED (any CRITICAL
+              or MEDIUM remaining). Normally CHANGES REQUESTED halts before Phase
+              12 — but in THIS unattended run, do NOT halt: record the verdict and
+              the TALLY counts and continue so the PR still opens. Report the
+              verdict HONESTLY in pr_body.md — never upgrade CHANGES REQUESTED to
+              APPROVED.
             - Do NOT perform any git operations. The workflow handles commit/push/PR.
 
             When the pipeline is complete, write a file `pr_body.md` at the repo
             root with EXACTLY this structure, filled in:
 
             ## New chain spec: ${{ github.event.inputs.chain_name }}
+
+            ### 🧪 Review verdict: <APPROVED | CHANGES REQUESTED>
+            <One line. From the Phase 11 final reviewer. If CHANGES REQUESTED,
+            state what blocks it (the unresolved CRITICAL/MEDIUM gaps).>
+
+            | Reviewer | CRITICAL | MEDIUM | MINOR |
+            |----------|---------:|-------:|------:|
+            | Phase 11 final | <X> | <Y> | <Z> |
+            | Phase 9 reviewer 1 | <X> | <Y> | <Z> |
+            | Phase 9 reviewer 2 | <X> | <Y> | <Z> |
+            | Phase 9 reviewer 3 | <X> | <Y> | <Z> |
 
             | Field | Value |
             |-------|-------|
