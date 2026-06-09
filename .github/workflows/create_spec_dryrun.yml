@@ -113,7 +113,28 @@ jobs:
           TARGET_STATUS: "PR REVIEW"
         run: |
           set -euo pipefail
-          base="$JIRA_BASE_URL/rest/api/3/issue/$ISSUE_KEY"
+          api="$JIRA_BASE_URL/rest/api/3"
+          base="$api/issue/$ISSUE_KEY"
+
+          # --- Preflight: diagnose auth / base-URL / visibility BEFORE writes ---
+          # Prints HTTP status codes so a misconfig is obvious in the log instead
+          # of a bare "curl 404". Non-fatal — we still attempt the writes after.
+          echo "::group::Jira preflight"
+          me_code="$(curl -s -o /dev/null -w '%{http_code}' \
+            -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" "$api/myself" || echo 000)"
+          issue_code="$(curl -s -o /dev/null -w '%{http_code}' \
+            -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" "$base" || echo 000)"
+          echo "GET /myself           -> $me_code"
+          echo "GET /issue/$ISSUE_KEY -> $issue_code"
+          if [ "$me_code" != "200" ]; then
+            echo "::warning::Jira auth failed (GET /myself -> $me_code). Check JIRA_USER_EMAIL/JIRA_API_TOKEN. A SCOPED token only works via the api.atlassian.com/ex/jira/{cloudId} gateway — set JIRA_BASE_URL to that; a 401 means bad credentials."
+          elif [ "$issue_code" != "200" ]; then
+            echo "::warning::Auth OK but $ISSUE_KEY not visible (GET issue -> $issue_code). The account likely lacks Browse Projects on that project, or JIRA_BASE_URL points at the wrong site."
+          else
+            echo "Preflight OK: credentials valid and $ISSUE_KEY is visible."
+          fi
+          echo "::endgroup::"
+
           if [ "$JOB_STATUS" = "success" ]; then
             label="spec-dryrun-ok"
             verdict="✅ parsed OK"
