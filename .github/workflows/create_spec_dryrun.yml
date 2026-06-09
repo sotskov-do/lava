@@ -109,8 +109,11 @@ jobs:
           TESTNET: ${{ steps.resolve.outputs.chain_testnet_index }}
           ADDITIONAL: ${{ steps.resolve.outputs.additional_data }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # Same destination status the real workflow moves the ticket to.
+          TARGET_STATUS: "PR REVIEW"
         run: |
           set -euo pipefail
+          base="$JIRA_BASE_URL/rest/api/3/issue/$ISSUE_KEY"
           if [ "$JOB_STATUS" = "success" ]; then
             label="spec-dryrun-ok"
             verdict="✅ parsed OK"
@@ -143,6 +146,29 @@ jobs:
           curl -sS -f -X PUT \
             -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
             -H "Content-Type: application/json" \
-            "$JIRA_BASE_URL/rest/api/3/issue/$ISSUE_KEY" \
+            "$base" \
             --data "{\"update\":{\"labels\":[{\"add\":\"$label\"}]}}" \
             || echo "::warning::Jira labelling of $ISSUE_KEY failed (non-fatal)."
+
+          # Transition to PR REVIEW on success — mirrors the real callback so the
+          # dry run also exercises the transition API. Looked up by status name.
+          if [ "$JOB_STATUS" = "success" ]; then
+            tid="$(curl -sS -f \
+                    -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
+                    -H "Accept: application/json" \
+                    "$base/transitions" 2>/dev/null \
+                  | jq -r --arg t "$TARGET_STATUS" \
+                      '.transitions[] | select((.to.name|ascii_upcase)==($t|ascii_upcase)) | .id' \
+                  | head -n1 || true)"
+            if [ -n "$tid" ]; then
+              echo "Transitioning $ISSUE_KEY to '$TARGET_STATUS' (id $tid)"
+              curl -sS -f -X POST \
+                -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
+                -H "Content-Type: application/json" \
+                "$base/transitions" \
+                --data "{\"transition\":{\"id\":\"$tid\"}}" \
+                || echo "::warning::Jira transition of $ISSUE_KEY to '$TARGET_STATUS' failed (non-fatal)."
+            else
+              echo "::warning::No available transition to '$TARGET_STATUS' from $ISSUE_KEY (non-fatal)."
+            fi
+          fi

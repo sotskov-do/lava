@@ -338,17 +338,46 @@ jobs:
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           ISSUE_KEY: ${{ steps.resolve.outputs.issue_key }}
           JOB_STATUS: ${{ job.status }}
+          # Destination status the ticket moves to on a successful run. Matched
+          # case-insensitively against the available transitions' target status.
+          TARGET_STATUS: "PR REVIEW"
         run: |
           set -euo pipefail
+          base="$JIRA_BASE_URL/rest/api/3/issue/$ISSUE_KEY"
           if [ "$JOB_STATUS" = "success" ]; then
             label="spec-pr-open"
           else
             label="spec-failed"
           fi
+
+          # 1. Label (always — survives even if the transition isn't available).
           echo "Labelling $ISSUE_KEY with '$label' (job status: $JOB_STATUS)"
           curl -sS -f -X PUT \
             -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
             -H "Content-Type: application/json" \
-            "$JIRA_BASE_URL/rest/api/3/issue/$ISSUE_KEY" \
+            "$base" \
             --data "{\"update\":{\"labels\":[{\"add\":\"$label\"}]}}" \
             || echo "::warning::Jira labelling of $ISSUE_KEY failed (non-fatal); the spec/PR result stands."
+
+          # 2. Transition to PR REVIEW — success only. Look up the transition id
+          # by destination status name so we don't hardcode a brittle numeric id.
+          if [ "$JOB_STATUS" = "success" ]; then
+            tid="$(curl -sS -f \
+                    -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
+                    -H "Accept: application/json" \
+                    "$base/transitions" 2>/dev/null \
+                  | jq -r --arg t "$TARGET_STATUS" \
+                      '.transitions[] | select((.to.name|ascii_upcase)==($t|ascii_upcase)) | .id' \
+                  | head -n1 || true)"
+            if [ -n "$tid" ]; then
+              echo "Transitioning $ISSUE_KEY to '$TARGET_STATUS' (id $tid)"
+              curl -sS -f -X POST \
+                -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
+                -H "Content-Type: application/json" \
+                "$base/transitions" \
+                --data "{\"transition\":{\"id\":\"$tid\"}}" \
+                || echo "::warning::Jira transition of $ISSUE_KEY to '$TARGET_STATUS' failed (non-fatal)."
+            else
+              echo "::warning::No available transition to '$TARGET_STATUS' from $ISSUE_KEY's current status (non-fatal)."
+            fi
+          fi
