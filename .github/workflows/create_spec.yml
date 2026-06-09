@@ -19,6 +19,8 @@
 name: "Create Spec"
 
 on:
+  repository_dispatch:
+    types: [create-spec]
   workflow_dispatch:
     inputs:
       chain_name:
@@ -53,7 +55,7 @@ permissions:
 # boot script's hardcoded ports/screens don't collide across runs. (Use a single
 # static group instead only if you move to a self-hosted runner shared by runs.)
 concurrency:
-  group: create-spec-${{ github.event.inputs.chain_name }}
+  group: create-spec-${{ github.event.inputs.chain_name || github.event.client_payload.title }}
   cancel-in-progress: false
 
 jobs:
@@ -67,11 +69,27 @@ jobs:
           ref: main
           fetch-depth: 0
 
+      - name: Resolve inputs
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          # workflow_dispatch (manual button)
+          WD_CHAIN_NAME: ${{ github.event.inputs.chain_name }}
+          WD_MAINNET: ${{ github.event.inputs.chain_mainnet_index }}
+          WD_TESTNET: ${{ github.event.inputs.chain_testnet_index }}
+          WD_ADDITIONAL: ${{ github.event.inputs.additional_data }}
+          # repository_dispatch (Jira). Passed via env (NOT interpolated into the
+          # script body) so a crafted title can't inject shell.
+          RD_TITLE: ${{ github.event.client_payload.title }}
+          RD_DESCRIPTION: ${{ github.event.client_payload.description }}
+          RD_ISSUE_KEY: ${{ github.event.client_payload.issue_key }}
+        run: bash .github/scripts/resolve_create_spec_inputs.sh
+
       - name: Compute branch name
         id: branch
         env:
-          CHAIN_NAME: ${{ github.event.inputs.chain_name }}
-          CHAIN_MAINNET_INDEX: ${{ github.event.inputs.chain_mainnet_index }}
+          CHAIN_NAME: ${{ steps.resolve.outputs.chain_name }}
+          CHAIN_MAINNET_INDEX: ${{ steps.resolve.outputs.chain_mainnet_index }}
         run: |
           chain_lower="$(printf '%s' "$CHAIN_NAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')"
           if [ -z "$chain_lower" ]; then
@@ -143,7 +161,7 @@ jobs:
           # Live visibility into phase progress / stalls. Off by default (dumps
           # tool results to the PUBLIC log); flip the show_full_output dispatch
           # input on per run when debugging.
-          show_full_output: ${{ inputs.show_full_output }}
+          show_full_output: ${{ github.event.inputs.show_full_output || false }}
           # display_report renders the full run report into $GITHUB_STEP_SUMMARY,
           # but a 12-phase / ~20-subagent create-spec run produces ~1.5MB — over
           # GitHub's hard 1MB summary cap — so the upload always fails with a red
@@ -158,10 +176,10 @@ jobs:
             Run the /create-spec skill end-to-end for a new chain, fully unattended.
 
             Phase 2 inputs (do NOT ask me for these — use exactly these values):
-            - Chain name: ${{ github.event.inputs.chain_name }}
-            - Mainnet spec index: ${{ github.event.inputs.chain_mainnet_index }}
-            - Testnet spec index: ${{ github.event.inputs.chain_testnet_index }}
-            - Additional data (docs URLs, node URLs, inheritance hints): ${{ github.event.inputs.additional_data }}
+            - Chain name: ${{ steps.resolve.outputs.chain_name }}
+            - Mainnet spec index: ${{ steps.resolve.outputs.chain_mainnet_index }}
+            - Testnet spec index: ${{ steps.resolve.outputs.chain_testnet_index }}
+            - Additional data (docs URLs, node URLs, inheritance hints): ${{ steps.resolve.outputs.additional_data }}
 
             Execution rules for this unattended CI run:
             - Run the FULL 12-phase pipeline, INCLUDING the Phase 8 local provider boot and the Phase 10b re-probe.
@@ -183,7 +201,7 @@ jobs:
             When the pipeline is complete, write a file `pr_body.md` at the repo
             root with EXACTLY this structure, filled in:
 
-            ## New chain spec: ${{ github.event.inputs.chain_name }}
+            ## New chain spec: ${{ steps.resolve.outputs.chain_name }}
 
             ### 🧪 Review verdict: <APPROVED | CHANGES REQUESTED>
             <One line. From the Phase 11 final reviewer. If CHANGES REQUESTED,
@@ -198,13 +216,13 @@ jobs:
 
             | Field | Value |
             |-------|-------|
-            | Chain name | ${{ github.event.inputs.chain_name }} |
-            | Mainnet index | ${{ github.event.inputs.chain_mainnet_index }} |
-            | Testnet index | ${{ github.event.inputs.chain_testnet_index }} |
+            | Chain name | ${{ steps.resolve.outputs.chain_name }} |
+            | Mainnet index | ${{ steps.resolve.outputs.chain_mainnet_index }} |
+            | Testnet index | ${{ steps.resolve.outputs.chain_testnet_index }} |
             | Spec file | specs/testnet-2/specs/<chain>.json |
 
             ### Inputs provided
-            ${{ github.event.inputs.additional_data }}
+            ${{ steps.resolve.outputs.additional_data }}
 
             ### Sources used
             - **Docs:** <doc URLs cited>
@@ -254,7 +272,7 @@ jobs:
 
       - name: Commit and push spec
         env:
-          CHAIN_NAME: ${{ github.event.inputs.chain_name }}
+          CHAIN_NAME: ${{ steps.resolve.outputs.chain_name }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -276,7 +294,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          CHAIN: ${{ github.event.inputs.chain_name }}
+          CHAIN: ${{ steps.resolve.outputs.chain_name }}
         run: |
           branch="${{ steps.branch.outputs.name }}"
           chain="$CHAIN"
@@ -311,3 +329,26 @@ jobs:
             --head "$branch" \
             --title "feat(spec): add ${chain} chain spec" \
             --body-file pr_body.md
+
+      - name: Report result to Jira
+        if: ${{ always() && steps.resolve.outputs.issue_key != '' }}
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          ISSUE_KEY: ${{ steps.resolve.outputs.issue_key }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          if [ "$JOB_STATUS" = "success" ]; then
+            label="spec-pr-open"
+          else
+            label="spec-failed"
+          fi
+          echo "Labelling $ISSUE_KEY with '$label' (job status: $JOB_STATUS)"
+          curl -sS -f -X PUT \
+            -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            "$JIRA_BASE_URL/rest/api/3/issue/$ISSUE_KEY" \
+            --data "{\"update\":{\"labels\":[{\"add\":\"$label\"}]}}" \
+            || echo "::warning::Jira labelling of $ISSUE_KEY failed (non-fatal); the spec/PR result stands."
