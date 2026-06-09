@@ -1,203 +1,148 @@
-# PHASE-8 SMOKE for create_spec.yml — does NOT run the create-spec skill.
-# Reproduces what create-spec Phase 8 does on the runner (build via
-# `make install-all`, bootstrap a node, gov-add specs/plans, stake a provider,
-# boot provider+consumer screens) for EXISTING in-repo specs, then probes the
-# local consumer. Purpose: flush out boot-time dependency / environment gaps
-# cheaply (~15-25 min) before paying for a full ~1h30m opus create-spec run.
+# Dry-run harness for the Jira <-> GitHub round trip used by create_spec.yml.
+# It does NOT run create-spec — it only parses the dispatch payload and reports
+# back to the Jira ticket, so you can verify the wiring (PAT, repository_dispatch,
+# the Jira "Send web request" rule, and the GitHub -> Jira callback secrets) in
+# seconds instead of waiting ~1.5h for a real run.
 #
-# Each matrix leg boots a chain and probes ONLY the interface that chain serves:
-#   - eth-jsonrpc-ws : ETH1 over jsonrpc + a websocket subscription (eth_subscribe)
-#   - lava-grpc      : LAV1 over gRPC (local node 127.0.0.1:9090), probed via grpcurl
-# Legs run on separate runners, so there is no provider-boot port/screen collision.
+# Trigger it the same way as the real one, but point a TEST Jira automation rule
+# at event_type "create-spec-dryrun" (not "create-spec"). Or fire it by hand:
+#   curl -sS -X POST \
+#     -H "Authorization: Bearer <FINE_GRAINED_PAT>" \
+#     -H "Accept: application/vnd.github+json" \
+#     https://api.github.com/repos/lavanet/lava/dispatches \
+#     -d '{"event_type":"create-spec-dryrun","client_payload":{"title":"[create-spec] Iota / IOTA / IOTAT","description":"hello","issue_key":"LAVA-1"}}'
 #
-# No Claude/auth secrets needed. Manual trigger only.
-name: "Create Spec (Phase 8 smoke)"
+# Like the real workflow, repository_dispatch only fires for the copy of this
+# file on the DEFAULT branch (main).
+name: "Create Spec (dry run)"
 
 on:
+  repository_dispatch:
+    types: [create-spec-dryrun]
   workflow_dispatch:
+    inputs:
+      chain_name:
+        description: "Human-readable chain name (e.g. Iota)"
+        required: true
+        type: string
+      chain_mainnet_index:
+        description: "Uppercase mainnet spec index (e.g. IOTA)"
+        required: true
+        type: string
+      chain_testnet_index:
+        description: "Uppercase testnet spec index (e.g. IOTAT)"
+        required: true
+        type: string
+      additional_data:
+        description: "Free text (echoed back, not used)"
+        required: false
+        type: string
+        default: ""
+      issue_key:
+        description: "Optional Jira issue key to comment on (e.g. LAVA-1). Leave empty to skip the Jira callback."
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
 
-concurrency:
-  group: create-spec-phase8-smoke
-  cancel-in-progress: false
-
 jobs:
-  phase8_smoke:
-    name: "phase8-smoke (${{ matrix.name }})"
+  dryrun:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: eth-jsonrpc-ws
-            spec_file: "specs/mainnet-1/specs/ethereum.json"
-            chain_id: "ETH1"
-            api_interface: "jsonrpc"
-            node_url: "https://ethereum-rpc.publicnode.com"
-            ws_node_url: "wss://ethereum-rpc.publicnode.com"
-            probe: "jsonrpc-ws"
-            probe_body: '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
-            ws_subscribe_body: '{"jsonrpc":"2.0","method":"eth_subscribe","params":["newHeads"],"id":1}'
-          # LAV1 (lava, cosmos-sdk) genuinely has a gRPC interface and is always
-          # in the boot script's default spec list, so its provider proxies to the
-          # local node's gRPC at 127.0.0.1:9090. spec_file here is a harmless extra
-          # to satisfy the script's required arg (ETH1; LAV1 needs no extra).
-          - name: lava-grpc
-            spec_file: "specs/mainnet-1/specs/ethereum.json"
-            chain_id: "LAV1"
-            api_interface: "grpc"
-            node_url: "127.0.0.1:9090"
-            ws_node_url: ""
-            probe: "grpc"
-            grpc_method: "cosmos.base.tendermint.v1beta1.Service/GetLatestBlock"
+    timeout-minutes: 5
     steps:
       - name: Checkout main
         uses: actions/checkout@v4
         with:
           ref: main
-          fetch-depth: 0
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.23.3"
-
-      # Node 22 gives a global `WebSocket` for the ws subscription probe.
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      # Same prep as the real workflow: boot tools + grpcurl (gRPC probe) + PATH.
-      - name: Prepare boot environment
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y screen psmisc jq
-          go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-
-      - name: Write provider config
+      # Same resolver the real workflow uses, so parsing behaviour is identical.
+      - name: Resolve inputs
+        id: resolve
         env:
-          CHAIN_ID: ${{ matrix.chain_id }}
-          API_INTERFACE: ${{ matrix.api_interface }}
-          NODE_URL: ${{ matrix.node_url }}
-          WS_NODE_URL: ${{ matrix.ws_node_url }}
+          EVENT_NAME: ${{ github.event_name }}
+          WD_CHAIN_NAME: ${{ github.event.inputs.chain_name }}
+          WD_MAINNET: ${{ github.event.inputs.chain_mainnet_index }}
+          WD_TESTNET: ${{ github.event.inputs.chain_testnet_index }}
+          WD_ADDITIONAL: ${{ github.event.inputs.additional_data }}
+          RD_TITLE: ${{ github.event.client_payload.title }}
+          RD_DESCRIPTION: ${{ github.event.client_payload.description }}
+          RD_ISSUE_KEY: ${{ github.event.client_payload.issue_key }}
+        run: bash .github/scripts/resolve_create_spec_inputs.sh
+
+      - name: Echo parsed inputs to the run summary
+        env:
+          CHAIN_NAME: ${{ steps.resolve.outputs.chain_name }}
+          MAINNET: ${{ steps.resolve.outputs.chain_mainnet_index }}
+          TESTNET: ${{ steps.resolve.outputs.chain_testnet_index }}
+          ADDITIONAL: ${{ steps.resolve.outputs.additional_data }}
+          ISSUE_KEY: ${{ steps.resolve.outputs.issue_key }}
         run: |
           {
-            echo "endpoints:"
-            echo "  - api-interface: ${API_INTERFACE}"
-            echo "    chain-id: ${CHAIN_ID}"
-            echo "    network-address:"
-            echo "      address: 127.0.0.1:2220"
-            echo "    node-urls:"
-            echo "      - url: ${NODE_URL}"
-            # wss:// entry so subscription methods can reach upstream (per Phase 8 docs)
-            [ -n "$WS_NODE_URL" ] && echo "      - url: ${WS_NODE_URL}"
-          } > config/smoke_provider.yml
-          echo "--- provider config ---"
-          cat config/smoke_provider.yml
+            echo "### Dry-run parsed payload"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| event | ${{ github.event_name }} |"
+            echo "| chain_name | $CHAIN_NAME |"
+            echo "| mainnet_index | $MAINNET |"
+            echo "| testnet_index | $TESTNET |"
+            echo "| issue_key | $ISSUE_KEY |"
+            echo "| additional_data | $ADDITIONAL |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      # Reproduces create-spec Phase 8: `make install-all`, start node, pass
-      # spec-add + plans-add gov proposals, stake provider, launch provider1 +
-      # consumers screens.
-      - name: Boot Phase 8 (build + node + provider + consumer)
+      # GitHub -> Jira callback. Posts a comment echoing what GitHub parsed, then
+      # adds a label, so BOTH directions of the round trip are proven. Uses the
+      # manual issue_key input as a fallback so a manual workflow_dispatch can
+      # also exercise the callback. Each Jira call is non-fatal.
+      - name: Report to Jira
+        if: ${{ always() && (steps.resolve.outputs.issue_key != '' || github.event.inputs.issue_key != '') }}
         env:
-          SPEC_FILE: ${{ matrix.spec_file }}
-          CHAIN_ID: ${{ matrix.chain_id }}
-          API_INTERFACE: ${{ matrix.api_interface }}
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          ISSUE_KEY: ${{ steps.resolve.outputs.issue_key || github.event.inputs.issue_key }}
+          JOB_STATUS: ${{ job.status }}
+          CHAIN_NAME: ${{ steps.resolve.outputs.chain_name }}
+          MAINNET: ${{ steps.resolve.outputs.chain_mainnet_index }}
+          TESTNET: ${{ steps.resolve.outputs.chain_testnet_index }}
+          ADDITIONAL: ${{ steps.resolve.outputs.additional_data }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          ./scripts/pre_setups/init_chain_only_with_node.sh \
-            "$SPEC_FILE" "$CHAIN_ID" "$API_INTERFACE" config/smoke_provider.yml
-
-      - name: Verify node and screens are up
-        run: |
-          export PATH="$(go env GOPATH)/bin:$PATH"
-          echo "--- screens ---"
-          screen -ls || true
-          for s in node provider1 consumers; do
-            if ! screen -ls | grep -q "\.${s}\b"; then
-              echo "FAIL: expected screen session '$s' is not running" >&2
-              exit 1
-            fi
-          done
-          height="$(lavad status 2>/dev/null | jq -r '.SyncInfo.latest_block_height // .sync_info.latest_block_height // empty')"
-          echo "lava node height: '$height'"
-          if [ -z "$height" ] || [ "$height" -lt 1 ] 2>/dev/null; then
-            echo "FAIL: lava node did not reach a block height" >&2
-            exit 1
+          set -euo pipefail
+          if [ "$JOB_STATUS" = "success" ]; then
+            label="spec-dryrun-ok"
+            verdict="✅ parsed OK"
+          else
+            label="spec-dryrun-failed"
+            verdict="❌ parse/job failed — check the run"
           fi
 
-      # All probes go through the LOCAL consumer (127.0.0.1:3360), NOT the upstream
-      # node. Best-effort: pairing takes an epoch to propagate, so retry; a failure
-      # is a warning, not a job failure — the boot/build/env checks above are the gate.
+          comment="$(printf '%s\n' \
+            "🔁 create-spec DRY RUN — Jira ↔ GitHub round trip $verdict" \
+            "" \
+            "GitHub received this dispatch and parsed:" \
+            "- chain_name: ${CHAIN_NAME:-<none>}" \
+            "- mainnet_index: ${MAINNET:-<none>}" \
+            "- testnet_index: ${TESTNET:-<none>}" \
+            "- additional_data: ${ADDITIONAL:-<none>}" \
+            "" \
+            "No spec was generated (dry run). Run: $RUN_URL")"
 
-      - name: Probe jsonrpc relay (best-effort)
-        if: ${{ contains(matrix.probe, 'jsonrpc') }}
-        env:
-          PROBE_BODY: ${{ matrix.probe_body }}
-        run: |
-          ok=0
-          for i in $(seq 1 30); do
-            resp="$(curl -s -m 8 -X POST http://127.0.0.1:3360 \
-              -H 'Content-Type: application/json' --data "$PROBE_BODY" || true)"
-            echo "attempt $i: $resp"
-            if echo "$resp" | jq -e '.result != null' >/dev/null 2>&1; then
-              ok=1; echo "jsonrpc relay OK"; break
-            fi
-            sleep 10
-          done
-          [ "$ok" -eq 1 ] || echo "::warning::jsonrpc relay returned no result (pairing/upstream); boot still validated"
+          # Comment (v2 API takes a plain-text body). jq builds the JSON safely.
+          jq -n --arg b "$comment" '{body: $b}' \
+            | curl -sS -f -X POST \
+                -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
+                -H "Content-Type: application/json" \
+                "$JIRA_BASE_URL/rest/api/2/issue/$ISSUE_KEY/comment" \
+                --data @- \
+            || echo "::warning::Jira comment on $ISSUE_KEY failed (non-fatal)."
 
-      # WebSocket: open ws://127.0.0.1:3360/ws, send a subscribe call, wait for a
-      # push message. Verifies the ws probe client (Node 22 WebSocket) + consumer ws.
-      - name: Probe websocket subscription (best-effort)
-        if: ${{ contains(matrix.probe, 'ws') && matrix.ws_node_url != '' }}
-        env:
-          WS_SUBSCRIBE_BODY: ${{ matrix.ws_subscribe_body }}
-        run: |
-          node --version
-          WS_SUBSCRIBE_BODY="$WS_SUBSCRIBE_BODY" node -e '
-            const body = process.env.WS_SUBSCRIBE_BODY;
-            const ws = new WebSocket("ws://127.0.0.1:3360/ws");
-            let gotPush = false;
-            const done = (msg) => { console.log(msg); try { ws.close(); } catch (e) {} process.exit(0); };
-            ws.onopen = () => { console.log("ws open; sending subscribe"); ws.send(body); };
-            ws.onerror = (e) => done("::warning::ws error: " + (e.message || e));
-            ws.onmessage = (e) => {
-              const d = e.data.toString();
-              console.log("ws msg:", d.slice(0, 200));
-              if (d.includes("\"params\"")) { gotPush = true; done("ws subscription push OK"); }
-            };
-            setTimeout(() => done(gotPush ? "ws OK" : "::warning::no ws push within 40s (boot still validated)"), 40000);
-          '
-
-      # gRPC: probe the consumer (which serves LAV1 gRPC) via grpcurl. Retries for
-      # pairing. Proves grpcurl + the consumer gRPC relay end-to-end.
-      - name: Probe gRPC relay (best-effort)
-        if: ${{ contains(matrix.probe, 'grpc') }}
-        env:
-          GRPC_METHOD: ${{ matrix.grpc_method }}
-        run: |
-          export PATH="$(go env GOPATH)/bin:$PATH"
-          grpcurl -version 2>&1 || true
-          ok=0
-          for i in $(seq 1 30); do
-            if grpcurl -plaintext -max-time 8 127.0.0.1:3360 "$GRPC_METHOD" >/tmp/grpc_out.json 2>/tmp/grpc_err.txt; then
-              echo "attempt $i: grpc relay OK"; head -c 300 /tmp/grpc_out.json; ok=1; break
-            fi
-            echo "attempt $i: $(head -c 200 /tmp/grpc_err.txt)"
-            sleep 10
-          done
-          [ "$ok" -eq 1 ] || echo "::warning::grpc relay did not succeed (pairing/method); grpcurl installed + boot validated"
-
-      - name: Upload boot logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: phase8-smoke-logs-${{ matrix.name }}
-          path: |
-            testutil/debugging/logs/*.log
-          if-no-files-found: warn
+          # Label, same call shape as the real workflow's callback.
+          curl -sS -f -X PUT \
+            -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            "$JIRA_BASE_URL/rest/api/3/issue/$ISSUE_KEY" \
+            --data "{\"update\":{\"labels\":[{\"add\":\"$label\"}]}}" \
+            || echo "::warning::Jira labelling of $ISSUE_KEY failed (non-fatal)."
